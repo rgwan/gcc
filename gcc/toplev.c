@@ -84,6 +84,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "context.h"
 #include "pass_manager.h"
 #include "optabs.h"
+#include "omp-low.h"
 
 #if defined(DBX_DEBUGGING_INFO) || defined(XCOFF_DEBUGGING_INFO)
 #include "dbxout.h"
@@ -583,6 +584,8 @@ compile_file (void)
 
       if (flag_sanitize & SANITIZE_THREAD)
 	tsan_finish_file ();
+
+      omp_finish_file ();
 
       output_shared_constant_pool ();
       output_object_blocks ();

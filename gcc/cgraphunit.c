@@ -217,6 +217,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-nested.h"
 #include "gimplify.h"
 #include "dbgcnt.h"
+#include "omp-low.h"
 #include "lto-section-names.h"
 
 /* Queue of cgraph nodes scheduled to be added into cgraph.  This is a
@@ -2002,8 +2003,10 @@ output_in_order (bool no_reorder)
   free (nodes);
 }
 
-/* Check whether there is at least one function or global variable to
-   offload.  */
+/* Check whether there is at least one function or global variable to offload.
+   Also collect all such global variables into OFFLOAD_VARS, the functions were
+   already collected in omp-low.c.  They will be streamed out in
+   ipa_write_summaries.  */
 
 static bool
 initialize_offload (void)
@@ -2027,6 +2030,7 @@ initialize_offload (void)
 				DECL_ATTRIBUTES (vnode->decl)))
 	continue;
       have_offload = true;
+      vec_safe_push (offload_vars, vnode->decl);
     }
 
   return have_offload;
