@@ -217,6 +217,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-nested.h"
 #include "gimplify.h"
 #include "dbgcnt.h"
+#include "lto-section-names.h"
 
 /* Queue of cgraph nodes scheduled to be added into cgraph.  This is a
    secondary queue used during optimization to accommodate passes that
@@ -2001,15 +2002,54 @@ output_in_order (bool no_reorder)
   free (nodes);
 }
 
+/* Check whether there is at least one function or global variable to
+   offload.  */
+
+static bool
+initialize_offload (void)
+{
+  bool have_offload = false;
+  struct cgraph_node *node;
+  struct varpool_node *vnode;
+
+  FOR_EACH_DEFINED_FUNCTION (node)
+    if (lookup_attribute ("omp declare target", DECL_ATTRIBUTES (node->decl)))
+      {
+	have_offload = true;
+	break;
+      }
+
+  FOR_EACH_DEFINED_VARIABLE (vnode)
+    {
+      if (TREE_CODE (vnode->decl) != VAR_DECL
+	  || DECL_SIZE (vnode->decl) == NULL_TREE
+	  || !lookup_attribute ("omp declare target",
+				DECL_ATTRIBUTES (vnode->decl)))
+	continue;
+      have_offload = true;
+    }
+
+  return have_offload;
+}
+
 static void
 ipa_passes (void)
 {
+  bool have_offload = false;
   gcc::pass_manager *passes = g->get_passes ();
 
   set_cfun (NULL);
   current_function_decl = NULL;
   gimple_register_cfg_hooks ();
   bitmap_obstack_initialize (NULL);
+
+  if (!in_lto_p && flag_openmp)
+    {
+      have_offload = initialize_offload ();
+      /* OpenMP offloading requires LTO infrastructure.  */
+      if (have_offload)
+	flag_generate_lto = 1;
+    }
 
   invoke_plugin_callbacks (PLUGIN_ALL_IPA_PASSES_START, NULL);
 
@@ -2048,7 +2088,18 @@ ipa_passes (void)
     targetm.asm_out.lto_start ();
 
   if (!in_lto_p)
-    ipa_write_summaries ();
+    {
+      if (have_offload)
+	{
+	  section_name_prefix = OFFLOAD_SECTION_NAME_PREFIX;
+	  ipa_write_summaries (true);
+	}
+      if (flag_lto)
+	{
+	  section_name_prefix = LTO_SECTION_NAME_PREFIX;
+	  ipa_write_summaries (false);
+	}
+    }
 
   if (flag_generate_lto)
     targetm.asm_out.lto_end ();
@@ -2129,7 +2180,7 @@ symbol_table::compile (void)
   state = IPA;
 
   /* If LTO is enabled, initialize the streamer hooks needed by GIMPLE.  */
-  if (flag_lto)
+  if (flag_lto || flag_openmp)
     lto_streamer_hooks_init ();
 
   /* Don't run the IPA passes if there was any error or sorry messages.  */

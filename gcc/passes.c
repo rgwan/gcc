@@ -2301,7 +2301,7 @@ ipa_write_summaries_1 (lto_symtab_encoder_t encoder)
 /* Write out summaries for all the nodes in the callgraph.  */
 
 void
-ipa_write_summaries (void)
+ipa_write_summaries (bool offload_lto_mode)
 {
   lto_symtab_encoder_t encoder;
   int i, order_pos;
@@ -2311,6 +2311,8 @@ ipa_write_summaries (void)
 
   if (!flag_generate_lto || seen_error ())
     return;
+
+  select_what_to_stream (offload_lto_mode);
 
   encoder = lto_symtab_encoder_new (false);
 
@@ -2338,15 +2340,16 @@ ipa_write_summaries (void)
 	  renumber_gimple_stmt_uids ();
 	  pop_cfun ();
 	}
-      if (node->definition)
+      if (node->definition && node->need_lto_streaming)
         lto_set_symtab_encoder_in_partition (encoder, node);
     }
 
   FOR_EACH_DEFINED_FUNCTION (node)
-    if (node->alias)
+    if (node->alias && node->need_lto_streaming)
       lto_set_symtab_encoder_in_partition (encoder, node);
   FOR_EACH_DEFINED_VARIABLE (vnode)
-    lto_set_symtab_encoder_in_partition (encoder, vnode);
+    if (vnode->need_lto_streaming)
+      lto_set_symtab_encoder_in_partition (encoder, vnode);
 
   ipa_write_summaries_1 (compute_ltrans_boundary (encoder));
 
