@@ -4305,6 +4305,15 @@ ix86_option_override (void)
   register_pass (&insert_vzeroupper_info);
 }
 
+/* Implement the TARGET_OFFLOAD_OPTIONS hook.  */
+static char *
+ix86_offload_options (void)
+{
+  if (TARGET_LP64)
+    return xstrdup ("-foffload-abi=lp64");
+  return xstrdup ("-foffload-abi=ilp32");
+}
+
 /* Update register usage after having seen the compiler flags.  */
 
 static void
@@ -47981,6 +47990,10 @@ ix86_atomic_assign_expand_fenv (tree *hold, tree *clear, tree *update)
 
 #undef TARGET_CALL_FUSAGE_CONTAINS_NON_CALLEE_CLOBBERS
 #define TARGET_CALL_FUSAGE_CONTAINS_NON_CALLEE_CLOBBERS true
+
+#undef TARGET_OFFLOAD_OPTIONS
+#define TARGET_OFFLOAD_OPTIONS \
+  ix86_offload_options
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 
