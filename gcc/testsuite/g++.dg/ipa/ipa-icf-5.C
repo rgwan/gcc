@@ -1,4 +1,6 @@
 /* { dg-do compile } */
+/* { dg-require-visibility "" } */
+/* { dg-require-alias "" } */
 /* { dg-options "-O2 -fdump-ipa-icf" } */
 
 struct test
@@ -20,4 +22,3 @@ int main()
 }
 
 /* { dg-final { scan-ipa-dump "Equal symbols: 0" "icf"  } } */
-/* { dg-final { cleanup-ipa-dump "icf" } } */

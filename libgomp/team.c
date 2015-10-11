@@ -1,7 +1,8 @@
-/* Copyright (C) 2005-2014 Free Software Foundation, Inc.
+/* Copyright (C) 2005-2015 Free Software Foundation, Inc.
    Contributed by Richard Henderson <rth@redhat.com>.
 
-   This file is part of the GNU OpenMP Library (libgomp).
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
 
    Libgomp is free software; you can redistribute it and/or modify it
    under the terms of the GNU General Public License as published by
@@ -37,7 +38,7 @@ pthread_key_t gomp_thread_destructor;
 
 
 /* This is the libgomp per-thread data structure.  */
-#ifdef HAVE_TLS
+#if defined HAVE_TLS || defined USE_EMUTLS
 __thread struct gomp_thread gomp_tls_data;
 #else
 pthread_key_t gomp_tls_key;
@@ -70,7 +71,7 @@ gomp_thread_start (void *xdata)
   void (*local_fn) (void *);
   void *local_data;
 
-#ifdef HAVE_TLS
+#if defined HAVE_TLS || defined USE_EMUTLS
   thr = &gomp_tls_data;
 #else
   struct gomp_thread local_thr;
@@ -133,6 +134,25 @@ gomp_thread_start (void *xdata)
   return NULL;
 }
 
+static inline struct gomp_team *
+get_last_team (unsigned nthreads)
+{
+  struct gomp_thread *thr = gomp_thread ();
+  if (thr->ts.team == NULL)
+    {
+      struct gomp_thread_pool *pool = thr->thread_pool;
+      if (pool != NULL)
+	{
+	  struct gomp_team *last_team = pool->last_team;
+	  if (last_team != NULL && last_team->nthreads == nthreads)
+	    {
+	      pool->last_team = NULL;
+	      return last_team;
+	    }
+	}
+    }
+  return NULL;
+}
 
 /* Create a new team data structure.  */
 
@@ -140,18 +160,27 @@ struct gomp_team *
 gomp_new_team (unsigned nthreads)
 {
   struct gomp_team *team;
-  size_t size;
   int i;
 
-  size = sizeof (*team) + nthreads * (sizeof (team->ordered_release[0])
-				      + sizeof (team->implicit_task[0]));
-  team = gomp_malloc (size);
+  team = get_last_team (nthreads);
+  if (team == NULL)
+    {
+      size_t extra = sizeof (team->ordered_release[0])
+		     + sizeof (team->implicit_task[0]);
+      team = gomp_malloc (sizeof (*team) + nthreads * extra);
+
+#ifndef HAVE_SYNC_BUILTINS
+      gomp_mutex_init (&team->work_share_list_free_lock);
+#endif
+      gomp_barrier_init (&team->barrier, nthreads);
+      gomp_mutex_init (&team->task_lock);
+
+      team->nthreads = nthreads;
+    }
 
   team->work_share_chunk = 8;
 #ifdef HAVE_SYNC_BUILTINS
   team->single_count = 0;
-#else
-  gomp_mutex_init (&team->work_share_list_free_lock);
 #endif
   team->work_shares_to_free = &team->work_shares[0];
   gomp_init_work_share (&team->work_shares[0], false, nthreads);
@@ -162,14 +191,10 @@ gomp_new_team (unsigned nthreads)
     team->work_shares[i].next_free = &team->work_shares[i + 1];
   team->work_shares[i].next_free = NULL;
 
-  team->nthreads = nthreads;
-  gomp_barrier_init (&team->barrier, nthreads);
-
   gomp_sem_init (&team->master_release, 0);
   team->ordered_release = (void *) &team->implicit_task[nthreads];
   team->ordered_release[0] = &team->master_release;
 
-  gomp_mutex_init (&team->task_lock);
   team->task_queue = NULL;
   team->task_count = 0;
   team->task_queued_count = 0;
@@ -186,6 +211,9 @@ gomp_new_team (unsigned nthreads)
 static void
 free_team (struct gomp_team *team)
 {
+#ifndef HAVE_SYNC_BUILTINS
+  gomp_mutex_destroy (&team->work_share_list_free_lock);
+#endif
   gomp_barrier_destroy (&team->barrier);
   gomp_mutex_destroy (&team->task_lock);
   free (team);
@@ -894,9 +922,6 @@ gomp_team_end (void)
       while (ws != NULL);
     }
   gomp_sem_destroy (&team->master_release);
-#ifndef HAVE_SYNC_BUILTINS
-  gomp_mutex_destroy (&team->work_share_list_free_lock);
-#endif
 
   if (__builtin_expect (thr->ts.team != NULL, 0)
       || __builtin_expect (team->nthreads == 1, 0))
@@ -916,7 +941,7 @@ gomp_team_end (void)
 static void __attribute__((constructor))
 initialize_team (void)
 {
-#ifndef HAVE_TLS
+#if !defined HAVE_TLS && !defined USE_EMUTLS
   static struct gomp_thread initial_thread_tls_data;
 
   pthread_key_create (&gomp_tls_key, NULL);

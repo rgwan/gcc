@@ -1,5 +1,5 @@
 /* Reassociation for trees.
-   Copyright (C) 2005-2014 Free Software Foundation, Inc.
+   Copyright (C) 2005-2015 Free Software Foundation, Inc.
    Contributed by Daniel Berlin <dan@dberlin.org>
 
 This file is part of GCC.
@@ -21,33 +21,36 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "hash-table.h"
-#include "tm.h"
-#include "rtl.h"
-#include "tm_p.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "gimple.h"
+#include "rtl.h"
+#include "ssa.h"
+#include "tm_p.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stor-layout.h"
-#include "basic-block.h"
+#include "cfganal.h"
 #include "gimple-pretty-print.h"
 #include "tree-inline.h"
-#include "hash-map.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
 #include "gimple-fold.h"
 #include "tree-eh.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
 #include "gimplify-me.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-ssa-loop-niter.h"
 #include "tree-ssa-loop.h"
+#include "flags.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
 #include "tree-dfa.h"
 #include "tree-ssa.h"
@@ -56,12 +59,12 @@ along with GCC; see the file COPYING3.  If not see
 #include "alloc-pool.h"
 #include "langhooks.h"
 #include "cfgloop.h"
-#include "flags.h"
 #include "target.h"
 #include "params.h"
 #include "diagnostic-core.h"
 #include "builtins.h"
 #include "gimplify.h"
+#include "insn-codes.h"
 #include "optabs.h"
 
 /*  This is a simple global reassociation pass.  It is, in part, based
@@ -206,7 +209,8 @@ typedef struct operand_entry
   unsigned int count;
 } *operand_entry_t;
 
-static alloc_pool operand_entry_pool;
+static object_allocator<operand_entry> operand_entry_pool ("operand entry pool",
+							 30);
 
 /* This is used to assign a unique ID to each struct operand_entry
    so that qsort results are identical on different hosts.  */
@@ -388,10 +392,6 @@ insert_operand_rank (tree e, long rank)
 static long
 get_rank (tree e)
 {
-  /* Constants have rank 0.  */
-  if (is_gimple_min_invariant (e))
-    return 0;
-
   /* SSA_NAME's have the rank of the expression they are the result
      of.
      For globals and uninitialized values, the rank is 0.
@@ -431,9 +431,9 @@ get_rank (tree e)
 
   if (TREE_CODE (e) == SSA_NAME)
     {
+      ssa_op_iter iter;
       gimple stmt;
       long rank;
-      int i, n;
       tree op;
 
       if (SSA_NAME_IS_DEFAULT_DEF (e))
@@ -443,8 +443,7 @@ get_rank (tree e)
       if (gimple_code (stmt) == GIMPLE_PHI)
 	return phi_rank (stmt);
 
-      if (!is_gimple_assign (stmt)
-	  || gimple_vdef (stmt))
+      if (!is_gimple_assign (stmt))
 	return bb_rank[gimple_bb (stmt)->index];
 
       /* If we already have a rank for this expression, use that.  */
@@ -455,34 +454,12 @@ get_rank (tree e)
       /* Otherwise, find the maximum rank for the operands.  As an
 	 exception, remove the bias from loop-carried phis when propagating
 	 the rank so that dependent operations are not also biased.  */
+      /* Simply walk over all SSA uses - this takes advatage of the
+         fact that non-SSA operands are is_gimple_min_invariant and
+	 thus have rank 0.  */
       rank = 0;
-      if (gimple_assign_single_p (stmt))
-	{
-	  tree rhs = gimple_assign_rhs1 (stmt);
-	  n = TREE_OPERAND_LENGTH (rhs);
-	  if (n == 0)
-	    rank = propagate_rank (rank, rhs);
-	  else
-	    {
-	      for (i = 0; i < n; i++)
-		{
-		  op = TREE_OPERAND (rhs, i);
-
-		  if (op != NULL_TREE)
-		    rank = propagate_rank (rank, op);
-		}
-	    }
-	}
-      else
-	{
-	  n = gimple_num_ops (stmt);
-	  for (i = 1; i < n; i++)
-	    {
-	      op = gimple_op (stmt, i);
-	      gcc_assert (op);
-	      rank = propagate_rank (rank, op);
-	    }
-	}
+      FOR_EACH_SSA_TREE_OPERAND (op, stmt, iter, SSA_OP_USE)
+	rank = propagate_rank (rank, op);
 
       if (dump_file && (dump_flags & TDF_DETAILS))
 	{
@@ -496,7 +473,7 @@ get_rank (tree e)
       return (rank + 1);
     }
 
-  /* Globals, etc,  are rank 0 */
+  /* Constants, globals, etc., are rank 0 */
   return 0;
 }
 
@@ -590,7 +567,7 @@ sort_by_operand_rank (const void *pa, const void *pb)
 static void
 add_to_ops_vec (vec<operand_entry_t> *ops, tree op)
 {
-  operand_entry_t oe = (operand_entry_t) pool_alloc (operand_entry_pool);
+  operand_entry_t oe = operand_entry_pool.allocate ();
 
   oe->op = op;
   oe->rank = get_rank (op);
@@ -606,7 +583,7 @@ static void
 add_repeat_to_ops_vec (vec<operand_entry_t> *ops, tree op,
 		       HOST_WIDE_INT repeat)
 {
-  operand_entry_t oe = (operand_entry_t) pool_alloc (operand_entry_pool);
+  operand_entry_t oe = operand_entry_pool.allocate ();
 
   oe->op = op;
   oe->rank = get_rank (op);
@@ -954,8 +931,8 @@ eliminate_using_constants (enum tree_code opcode,
 	case MULT_EXPR:
 	  if (integer_zerop (oelast->op)
 	      || (FLOAT_TYPE_P (type)
-		  && !HONOR_NANS (TYPE_MODE (type))
-		  && !HONOR_SIGNED_ZEROS (TYPE_MODE (type))
+		  && !HONOR_NANS (type)
+		  && !HONOR_SIGNED_ZEROS (type)
 		  && real_zerop (oelast->op)))
 	    {
 	      if (ops->length () != 1)
@@ -971,7 +948,7 @@ eliminate_using_constants (enum tree_code opcode,
 	    }
 	  else if (integer_onep (oelast->op)
 		   || (FLOAT_TYPE_P (type)
-		       && !HONOR_SNANS (TYPE_MODE (type))
+		       && !HONOR_SNANS (type)
 		       && real_onep (oelast->op)))
 	    {
 	      if (ops->length () != 1)
@@ -1014,12 +991,12 @@ static void linearize_expr_tree (vec<operand_entry_t> *, gimple,
 				 bool, bool);
 
 /* Structure for tracking and counting operands.  */
-typedef struct oecount_s {
+struct oecount {
   int cnt;
   int id;
   enum tree_code oecode;
   tree op;
-} oecount;
+};
 
 
 /* The heap for the oecount hashtable and the sorted list of operands.  */
@@ -1028,24 +1005,16 @@ static vec<oecount> cvec;
 
 /* Oecount hashtable helpers.  */
 
-struct oecount_hasher
+struct oecount_hasher : int_hash <int, 0, 1>
 {
-  typedef int value_type;
-  typedef int compare_type;
-  typedef int store_values_directly;
-  static inline hashval_t hash (const value_type &);
-  static inline bool equal (const value_type &, const compare_type &);
-  static bool is_deleted (int &v) { return v == 1; }
-  static void mark_deleted (int &e) { e = 1; }
-  static bool is_empty (int &v) { return v == 0; }
-  static void mark_empty (int &e) { e = 0; }
-  static void remove (int &) {}
+  static inline hashval_t hash (int);
+  static inline bool equal (int, int);
 };
 
 /* Hash function for oecount.  */
 
 inline hashval_t
-oecount_hasher::hash (const value_type &p)
+oecount_hasher::hash (int p)
 {
   const oecount *c = &cvec[p - 42];
   return htab_hash_pointer (c->op) ^ (hashval_t)c->oecode;
@@ -1054,7 +1023,7 @@ oecount_hasher::hash (const value_type &p)
 /* Comparison function for oecount.  */
 
 inline bool
-oecount_hasher::equal (const value_type &p1, const compare_type &p2)
+oecount_hasher::equal (int p1, int p2)
 {
   const oecount *c1 = &cvec[p1 - 42];
   const oecount *c2 = &cvec[p2 - 42];
@@ -1326,11 +1295,11 @@ build_and_add_sum (tree type, tree op1, tree op2, enum tree_code opcode)
   gimple op1def = NULL, op2def = NULL;
   gimple_stmt_iterator gsi;
   tree op;
-  gimple sum;
+  gassign *sum;
 
   /* Create the addition statement.  */
-  op = make_ssa_name (type, NULL);
-  sum = gimple_build_assign_with_ops (opcode, op, op1, op2);
+  op = make_ssa_name (type);
+  sum = gimple_build_assign (op, opcode, op1, op2);
 
   /* Find an insertion place and insert.  */
   if (TREE_CODE (op1) == SSA_NAME)
@@ -2057,7 +2026,7 @@ range_entry_cmp (const void *a, const void *b)
 	      else
 		return -1;
 	    }
-	  else if (p->high != NULL_TREE)
+	  else if (q->high != NULL_TREE)
 	    return 1;
 	  /* If both ranges are the same, sort below by ascending idx.  */
 	}
@@ -2148,10 +2117,18 @@ update_range_test (struct range_entry *range, struct range_entry *otherrange,
 
   tem = fold_convert_loc (loc, optype, tem);
   gsi = gsi_for_stmt (stmt);
+  unsigned int uid = gimple_uid (stmt);
   /* In rare cases range->exp can be equal to lhs of stmt.
      In that case we have to insert after the stmt rather then before
-     it.  */
-  if (op == range->exp)
+     it.  If stmt is a PHI, insert it at the start of the basic block.  */
+  if (op != range->exp)
+    {
+      gsi_insert_seq_before (&gsi, seq, GSI_SAME_STMT);
+      tem = force_gimple_operand_gsi (&gsi, tem, true, NULL_TREE, true,
+				      GSI_SAME_STMT);
+      gsi_prev (&gsi);
+    }
+  else if (gimple_code (stmt) != GIMPLE_PHI)
     {
       gsi_insert_seq_after (&gsi, seq, GSI_CONTINUE_LINKING);
       tem = force_gimple_operand_gsi (&gsi, tem, true, NULL_TREE, false,
@@ -2159,16 +2136,32 @@ update_range_test (struct range_entry *range, struct range_entry *otherrange,
     }
   else
     {
+      gsi = gsi_after_labels (gimple_bb (stmt));
+      if (!gsi_end_p (gsi))
+	uid = gimple_uid (gsi_stmt (gsi));
+      else
+	{
+	  gsi = gsi_start_bb (gimple_bb (stmt));
+	  uid = 1;
+	  while (!gsi_end_p (gsi))
+	    {
+	      uid = gimple_uid (gsi_stmt (gsi));
+	      gsi_next (&gsi);
+	    }
+	}
       gsi_insert_seq_before (&gsi, seq, GSI_SAME_STMT);
       tem = force_gimple_operand_gsi (&gsi, tem, true, NULL_TREE, true,
 				      GSI_SAME_STMT);
-      gsi_prev (&gsi);
+      if (gsi_end_p (gsi))
+	gsi = gsi_last_bb (gimple_bb (stmt));
+      else
+	gsi_prev (&gsi);
     }
   for (; !gsi_end_p (gsi); gsi_prev (&gsi))
     if (gimple_uid (gsi_stmt (gsi)))
       break;
     else
-      gimple_set_uid (gsi_stmt (gsi), gimple_uid (stmt));
+      gimple_set_uid (gsi_stmt (gsi), uid);
 
   oe->op = tem;
   range->exp = exp;
@@ -2386,26 +2379,25 @@ extract_bit_test_mask (tree exp, int prec, tree totallow, tree low, tree high,
 	      && TREE_CODE (exp) == PLUS_EXPR
 	      && TREE_CODE (TREE_OPERAND (exp, 1)) == INTEGER_CST)
 	    {
+	      tree ret = TREE_OPERAND (exp, 0);
+	      STRIP_NOPS (ret);
 	      widest_int bias
 	        = wi::neg (wi::sext (wi::to_widest (TREE_OPERAND (exp, 1)),
 				     TYPE_PRECISION (TREE_TYPE (low))));
-	      tree tbias = wide_int_to_tree (TREE_TYPE (low), bias);
+	      tree tbias = wide_int_to_tree (TREE_TYPE (ret), bias);
 	      if (totallowp)
 		{
 		  *totallowp = tbias;
-		  exp = TREE_OPERAND (exp, 0);
-		  STRIP_NOPS (exp);
-		  return exp;
+		  return ret;
 		}
 	      else if (!tree_int_cst_lt (totallow, tbias))
 		return NULL_TREE;
+	      bias = wi::to_widest (tbias);
 	      bias -= wi::to_widest (totallow);
 	      if (wi::ges_p (bias, 0) && wi::lts_p (bias, prec - max))
 		{
 		  *mask = wi::lshift (*mask, bias);
-		  exp = TREE_OPERAND (exp, 0);
-		  STRIP_NOPS (exp);
-		  return exp;
+		  return ret;
 		}
 	    }
 	}
@@ -2536,10 +2528,10 @@ optimize_range_tests_to_bit_test (enum tree_code opcode, int first, int length,
 						      GEN_INT (-m)), speed_p);
 	      rtx r = immed_wide_int_const (mask, word_mode);
 	      cost_diff += set_src_cost (gen_rtx_AND (word_mode, reg, r),
-					 speed_p);
+					 word_mode, speed_p);
 	      r = immed_wide_int_const (wi::lshift (mask, m), word_mode);
 	      cost_diff -= set_src_cost (gen_rtx_AND (word_mode, reg, r),
-					 speed_p);
+					 word_mode, speed_p);
 	      if (cost_diff > 0)
 		{
 		  mask = wi::lshift (mask, m);
@@ -2580,10 +2572,8 @@ optimize_range_tests_to_bit_test (enum tree_code opcode, int first, int length,
 	  gimple_seq_add_seq_without_update (&seq, seq2);
 	  gcc_assert (TREE_CODE (exp) == SSA_NAME);
 	  gimple_set_visited (SSA_NAME_DEF_STMT (exp), true);
-	  gimple g
-	    = gimple_build_assign_with_ops (BIT_IOR_EXPR,
-					    make_ssa_name (optype, NULL),
-					    tem, exp);
+	  gimple g = gimple_build_assign (make_ssa_name (optype),
+					  BIT_IOR_EXPR, tem, exp);
 	  gimple_set_location (g, loc);
 	  gimple_seq_add_stmt_without_update (&seq, g);
 	  exp = gimple_assign_lhs (g);
@@ -2775,7 +2765,7 @@ suitable_cond_bb (basic_block bb, basic_block test_bb, basic_block *other_bb,
   edge_iterator ei, ei2;
   edge e, e2;
   gimple stmt;
-  gimple_stmt_iterator gsi;
+  gphi_iterator gsi;
   bool other_edge_seen = false;
   bool is_cond;
 
@@ -2837,7 +2827,7 @@ suitable_cond_bb (basic_block bb, basic_block test_bb, basic_block *other_bb,
   e2 = find_edge (test_bb, *other_bb);
   for (gsi = gsi_start_phis (e->dest); !gsi_end_p (gsi); gsi_next (&gsi))
     {
-      gimple phi = gsi_stmt (gsi);
+      gphi *phi = gsi.phi ();
       /* If both BB and TEST_BB end with GIMPLE_COND, all PHI arguments
 	 corresponding to BB and TEST_BB predecessor must be the same.  */
       if (!operand_equal_p (gimple_phi_arg_def (phi, e->dest_idx),
@@ -2941,7 +2931,7 @@ get_ops (tree var, enum tree_code code, vec<operand_entry_t> *ops,
 	&& !get_ops (rhs[i], code, ops, loop)
 	&& has_single_use (rhs[i]))
       {
-	operand_entry_t oe = (operand_entry_t) pool_alloc (operand_entry_pool);
+	operand_entry_t oe = operand_entry_pool.allocate ();
 
 	oe->op = rhs[i];
 	oe->rank = code;
@@ -2987,9 +2977,9 @@ update_ops (tree var, enum tree_code code, vec<operand_entry_t> ops,
       && (rhs[2] != rhs[1] || rhs[3] != rhs[0]))
     {
       gimple_stmt_iterator gsi = gsi_for_stmt (stmt);
-      var = make_ssa_name (TREE_TYPE (var), NULL);
-      gimple g = gimple_build_assign_with_ops (gimple_assign_rhs_code (stmt),
-					       var, rhs[2], rhs[3]);
+      var = make_ssa_name (TREE_TYPE (var));
+      gassign *g = gimple_build_assign (var, gimple_assign_rhs_code (stmt),
+					rhs[2], rhs[3]);
       gimple_set_uid (g, gimple_uid (stmt));
       gimple_set_visited (g, true);
       gsi_insert_before (&gsi, g, GSI_SAME_STMT);
@@ -3174,8 +3164,7 @@ maybe_optimize_range_tests (gimple stmt)
 	      && has_single_use (rhs))
 	    {
 	      /* Otherwise, push the _234 range test itself.  */
-	      operand_entry_t oe
-		= (operand_entry_t) pool_alloc (operand_entry_pool);
+	      operand_entry_t oe = operand_entry_pool.allocate ();
 
 	      oe->op = rhs;
 	      oe->rank = code;
@@ -3207,8 +3196,7 @@ maybe_optimize_range_tests (gimple stmt)
 			   loop_containing_stmt (stmt))))
 	{
 	  /* Or push the GIMPLE_COND stmt itself.  */
-	  operand_entry_t oe
-	    = (operand_entry_t) pool_alloc (operand_entry_pool);
+	  operand_entry_t oe = operand_entry_pool.allocate ();
 
 	  oe->op = NULL;
 	  oe->rank = (e->flags & EDGE_TRUE_VALUE)
@@ -3284,18 +3272,17 @@ maybe_optimize_range_tests (gimple stmt)
 		    {
 		      gcc_assert (bb == last_bb);
 		      tree lhs = gimple_assign_lhs (cast_stmt);
-		      tree new_lhs = make_ssa_name (TREE_TYPE (lhs), NULL);
+		      tree new_lhs = make_ssa_name (TREE_TYPE (lhs));
 		      enum tree_code rhs_code
 			= gimple_assign_rhs_code (cast_stmt);
-		      gimple g;
+		      gassign *g;
 		      if (is_gimple_min_invariant (new_op))
 			{
 			  new_op = fold_convert (TREE_TYPE (lhs), new_op);
 			  g = gimple_build_assign (new_lhs, new_op);
 			}
 		      else
-			g = gimple_build_assign_with_ops (rhs_code, new_lhs,
-							  new_op, NULL_TREE);
+			g = gimple_build_assign (new_lhs, rhs_code, new_op);
 		      gimple_stmt_iterator gsi = gsi_for_stmt (cast_stmt);
 		      gimple_set_uid (g, gimple_uid (cast_stmt));
 		      gimple_set_visited (g, true);
@@ -3321,18 +3308,19 @@ maybe_optimize_range_tests (gimple stmt)
 	      && bbinfo[idx].op == NULL_TREE
 	      && ops[bbinfo[idx].first_idx]->op != NULL_TREE)
 	    {
-	      stmt = last_stmt (bb);
+	      gcond *cond_stmt = as_a <gcond *> (last_stmt (bb));
 	      if (integer_zerop (ops[bbinfo[idx].first_idx]->op))
-		gimple_cond_make_false (stmt);
+		gimple_cond_make_false (cond_stmt);
 	      else if (integer_onep (ops[bbinfo[idx].first_idx]->op))
-		gimple_cond_make_true (stmt);
+		gimple_cond_make_true (cond_stmt);
 	      else
 		{
-		  gimple_cond_set_code (stmt, NE_EXPR);
-		  gimple_cond_set_lhs (stmt, ops[bbinfo[idx].first_idx]->op);
-		  gimple_cond_set_rhs (stmt, boolean_false_node);
+		  gimple_cond_set_code (cond_stmt, NE_EXPR);
+		  gimple_cond_set_lhs (cond_stmt,
+				       ops[bbinfo[idx].first_idx]->op);
+		  gimple_cond_set_rhs (cond_stmt, boolean_false_node);
 		}
-	      update_stmt (stmt);
+	      update_stmt (cond_stmt);
 	    }
 	  if (bb == first_bb)
 	    break;
@@ -3348,6 +3336,7 @@ static bool
 is_phi_for_stmt (gimple stmt, tree operand)
 {
   gimple def_stmt;
+  gphi *def_phi;
   tree lhs;
   use_operand_p arg_p;
   ssa_op_iter i;
@@ -3358,10 +3347,11 @@ is_phi_for_stmt (gimple stmt, tree operand)
   lhs = gimple_assign_lhs (stmt);
 
   def_stmt = SSA_NAME_DEF_STMT (operand);
-  if (gimple_code (def_stmt) != GIMPLE_PHI)
+  def_phi = dyn_cast <gphi *> (def_stmt);
+  if (!def_phi)
     return false;
 
-  FOR_EACH_PHI_ARG (arg_p, def_stmt, i, SSA_OP_USE)
+  FOR_EACH_PHI_ARG (arg_p, def_phi, i, SSA_OP_USE)
     if (lhs == USE_FROM_PTR (arg_p))
       return true;
   return false;
@@ -3479,7 +3469,7 @@ rewrite_expr_tree (gimple stmt, unsigned int opindex,
 
   /* The final recursion case for this function is that you have
      exactly two operations left.
-     If we had one exactly one op in the entire list to start with, we
+     If we had exactly one op in the entire list to start with, we
      would have never called this function, and the tail recursion
      rewrites them one at a time.  */
   if (opindex + 2 == ops.length ())
@@ -3500,13 +3490,17 @@ rewrite_expr_tree (gimple stmt, unsigned int opindex,
 	      print_gimple_stmt (dump_file, stmt, 0, 0);
 	    }
 
-	  if (changed)
+	  /* Even when changed is false, reassociation could have e.g. removed
+	     some redundant operations, so unless we are just swapping the
+	     arguments or unless there is no change at all (then we just
+	     return lhs), force creation of a new SSA_NAME.  */
+	  if (changed || ((rhs1 != oe2->op || rhs2 != oe1->op) && opindex))
 	    {
 	      gimple insert_point = find_insert_point (stmt, oe1->op, oe2->op);
-	      lhs = make_ssa_name (TREE_TYPE (lhs), NULL);
+	      lhs = make_ssa_name (TREE_TYPE (lhs));
 	      stmt
-		= gimple_build_assign_with_ops (gimple_assign_rhs_code (stmt),
-						lhs, oe1->op, oe2->op);
+		= gimple_build_assign (lhs, gimple_assign_rhs_code (stmt),
+				       oe1->op, oe2->op);
 	      gimple_set_uid (stmt, uid);
 	      gimple_set_visited (stmt, true);
 	      if (insert_point == gsi_stmt (gsi))
@@ -3568,9 +3562,9 @@ rewrite_expr_tree (gimple stmt, unsigned int opindex,
 	  unsigned int uid = gimple_uid (stmt);
 	  gimple insert_point = find_insert_point (stmt, new_rhs1, oe->op);
 
-	  lhs = make_ssa_name (TREE_TYPE (lhs), NULL);
-	  stmt = gimple_build_assign_with_ops (gimple_assign_rhs_code (stmt),
-					       lhs, new_rhs1, oe->op);
+	  lhs = make_ssa_name (TREE_TYPE (lhs));
+	  stmt = gimple_build_assign (lhs, gimple_assign_rhs_code (stmt),
+				      new_rhs1, oe->op);
 	  gimple_set_uid (stmt, uid);
 	  gimple_set_visited (stmt, true);
 	  if (insert_point == gsi_stmt (gsi))
@@ -3629,7 +3623,7 @@ get_required_cycles (int ops_num, int cpu_width)
 
 static int
 get_reassociation_width (int ops_num, enum tree_code opc,
-			 enum machine_mode mode)
+			 machine_mode mode)
 {
   int param_width = PARAM_VALUE (PARAM_TREE_REASSOC_WIDTH);
   int width;
@@ -3674,7 +3668,7 @@ get_reassociation_width (int ops_num, enum tree_code opc,
    parallel.  */
 
 static void
-rewrite_expr_tree_parallel (gimple stmt, int width,
+rewrite_expr_tree_parallel (gassign *stmt, int width,
 			    vec<operand_entry_t> ops)
 {
   enum tree_code opcode = gimple_assign_rhs_code (stmt);
@@ -3786,10 +3780,10 @@ linearize_expr (gimple stmt)
   gsi = gsi_for_stmt (stmt);
 
   gimple_assign_set_rhs2 (stmt, gimple_assign_rhs1 (binrhs));
-  binrhs = gimple_build_assign_with_ops (gimple_assign_rhs_code (binrhs),
-					 make_ssa_name (TREE_TYPE (lhs), NULL),
-					 gimple_assign_lhs (binlhs),
-					 gimple_assign_rhs2 (binrhs));
+  binrhs = gimple_build_assign (make_ssa_name (TREE_TYPE (lhs)),
+				gimple_assign_rhs_code (binrhs),
+				gimple_assign_lhs (binlhs),
+				gimple_assign_rhs2 (binrhs));
   gimple_assign_set_rhs1 (stmt, gimple_assign_lhs (binrhs));
   gsi_insert_before (&gsi, binrhs, GSI_SAME_STMT);
   gimple_set_uid (binrhs, gimple_uid (stmt));
@@ -3875,9 +3869,9 @@ negate_value (tree tonegate, gimple_stmt_iterator *gsip)
       rhs2 = negate_value (rhs2, &gsi);
 
       gsi = gsi_for_stmt (negatedefstmt);
-      lhs = make_ssa_name (TREE_TYPE (lhs), NULL);
+      lhs = make_ssa_name (TREE_TYPE (lhs));
       gimple_set_visited (negatedefstmt, true);
-      g = gimple_build_assign_with_ops (PLUS_EXPR, lhs, rhs1, rhs2);
+      g = gimple_build_assign (lhs, PLUS_EXPR, rhs1, rhs2);
       gimple_set_uid (g, gimple_uid (negatedefstmt));
       gsi_insert_before (&gsi, g, GSI_SAME_STMT);
       return lhs;
@@ -3976,6 +3970,9 @@ acceptable_pow_call (gimple stmt, tree *base, HOST_WIDE_INT *exponent)
   switch (DECL_FUNCTION_CODE (fndecl))
     {
     CASE_FLT_FN (BUILT_IN_POW):
+      if (flag_errno_math)
+	return false;
+
       *base = gimple_call_arg (stmt, 0);
       arg1 = gimple_call_arg (stmt, 1);
 
@@ -4059,8 +4056,6 @@ linearize_expr_tree (vec<operand_entry_t> *ops, gimple stmt,
 
   if (!binlhsisreassoc)
     {
-      tree temp;
-
       /* If this is not a associative operation like division, give up.  */
       if (!is_associative)
 	{
@@ -4112,9 +4107,7 @@ linearize_expr_tree (vec<operand_entry_t> *ops, gimple stmt,
 
       /* We want to make it so the lhs is always the reassociative op,
 	 so swap.  */
-      temp = binlhs;
-      binlhs = binrhs;
-      binrhs = temp;
+      std::swap (binlhs, binrhs);
     }
   else if (binrhsisreassoc)
     {
@@ -4202,10 +4195,10 @@ repropagate_negates (void)
 	      tree b = gimple_assign_rhs2 (user);
 	      gimple_stmt_iterator gsi = gsi_for_stmt (feed);
 	      gimple_stmt_iterator gsi2 = gsi_for_stmt (user);
-	      tree x = make_ssa_name (TREE_TYPE (gimple_assign_lhs (feed)), NULL);
-	      gimple g = gimple_build_assign_with_ops (PLUS_EXPR, x, a, b);
+	      tree x = make_ssa_name (TREE_TYPE (gimple_assign_lhs (feed)));
+	      gimple g = gimple_build_assign (x, PLUS_EXPR, a, b);
 	      gsi_insert_before (&gsi2, g, GSI_SAME_STMT);
-	      gimple_assign_set_rhs_with_ops (&gsi2, NEGATE_EXPR, x, NULL);
+	      gimple_assign_set_rhs_with_ops (&gsi2, NEGATE_EXPR, x);
 	      user = gsi_stmt (gsi2);
 	      update_stmt (user);
 	      reassoc_remove_stmt (&gsi);
@@ -4491,7 +4484,7 @@ attempt_builtin_powi (gimple stmt, vec<operand_entry_t> *ops)
 		      if (elt < vec_len - 1)
 			fputs (" * ", dump_file);
 		    }
-		  fprintf (dump_file, ")^"HOST_WIDE_INT_PRINT_DEC"\n",
+		  fprintf (dump_file, ")^" HOST_WIDE_INT_PRINT_DEC"\n",
 			   power);
 		}
 	    }
@@ -4525,7 +4518,7 @@ attempt_builtin_powi (gimple stmt, vec<operand_entry_t> *ops)
 		  if (elt < vec_len - 1)
 		    fputs (" * ", dump_file);
 		}
-	      fprintf (dump_file, ")^"HOST_WIDE_INT_PRINT_DEC"\n", power);
+	      fprintf (dump_file, ")^" HOST_WIDE_INT_PRINT_DEC"\n", power);
 	    }
 
 	  reassociate_stats.pows_created++;
@@ -4556,9 +4549,8 @@ attempt_builtin_powi (gimple stmt, vec<operand_entry_t> *ops)
 		  op2 = rf2->repr;
 
 		  target_ssa = make_temp_ssa_name (type, NULL, "reassocpow");
-		  mul_stmt = gimple_build_assign_with_ops (MULT_EXPR,
-							   target_ssa,
-							   op1, op2);
+		  mul_stmt = gimple_build_assign (target_ssa, MULT_EXPR,
+						  op1, op2);
 		  gimple_set_location (mul_stmt, gimple_location (stmt));
 		  gsi_insert_before (&gsi, mul_stmt, GSI_SAME_STMT);
 		  rf1->repr = target_ssa;
@@ -4585,8 +4577,8 @@ attempt_builtin_powi (gimple stmt, vec<operand_entry_t> *ops)
       if (result)
 	{
 	  tree new_result = make_temp_ssa_name (type, NULL, "reassocpow");
-	  mul_stmt = gimple_build_assign_with_ops (MULT_EXPR, new_result,
-						   result, iter_result);
+	  mul_stmt = gimple_build_assign (new_result, MULT_EXPR,
+					  result, iter_result);
 	  gimple_set_location (mul_stmt, gimple_location (stmt));
 	  gsi_insert_before (&gsi, mul_stmt, GSI_SAME_STMT);
 	  gimple_set_visited (mul_stmt, true);
@@ -4804,7 +4796,7 @@ reassociate_bb (basic_block bb)
 		}
 	      else
 		{
-		  enum machine_mode mode = TYPE_MODE (TREE_TYPE (lhs));
+		  machine_mode mode = TYPE_MODE (TREE_TYPE (lhs));
 		  int ops_num = ops.length ();
 		  int width = get_reassociation_width (ops_num, rhs_code, mode);
 		  tree new_lhs = lhs;
@@ -4815,7 +4807,8 @@ reassociate_bb (basic_block bb)
 
 		  if (width > 1
 		      && ops.length () > 3)
-		    rewrite_expr_tree_parallel (stmt, width, ops);
+		    rewrite_expr_tree_parallel (as_a <gassign *> (stmt),
+						width, ops);
 		  else
                     {
                       /* When there are three operands left, we want
@@ -4842,9 +4835,8 @@ reassociate_bb (basic_block bb)
 		      update_stmt (lhs_stmt);
 		      if (lhs != new_lhs)
 			target_ssa = new_lhs;
-		      mul_stmt = gimple_build_assign_with_ops (MULT_EXPR, lhs,
-							       powi_result,
-							       target_ssa);
+		      mul_stmt = gimple_build_assign (lhs, MULT_EXPR,
+						      powi_result, target_ssa);
 		      gimple_set_location (mul_stmt, gimple_location (stmt));
 		      gsi_insert_after (&gsi, mul_stmt, GSI_NEW_STMT);
 		    }
@@ -4922,7 +4914,7 @@ branch_fixup (void)
       else
 	gcc_unreachable ();
       tree lhs = gimple_assign_lhs (use_stmt);
-      gimple phi = create_phi_node (lhs, merge_bb);
+      gphi *phi = create_phi_node (lhs, merge_bb);
       add_phi_arg (phi, build_one_cst (TREE_TYPE (lhs)), etrue, loc);
       add_phi_arg (phi, othervar, single_succ_edge (then_bb), loc);
       gsi = gsi_for_stmt (use_stmt);
@@ -4982,8 +4974,6 @@ init_reassoc (void)
 
   memset (&reassociate_stats, 0, sizeof (reassociate_stats));
 
-  operand_entry_pool = create_alloc_pool ("operand entry pool",
-					  sizeof (struct operand_entry), 30);
   next_operand_entry_id = 0;
 
   /* Reverse RPO (Reverse Post Order) will give us something where
@@ -5032,7 +5022,7 @@ fini_reassoc (void)
 			    reassociate_stats.pows_created);
 
   delete operand_rank;
-  free_alloc_pool (operand_entry_pool);
+  operand_entry_pool.release ();
   free (bb_rank);
   plus_negates.release ();
   free_dominance_info (CDI_POST_DOMINATORS);

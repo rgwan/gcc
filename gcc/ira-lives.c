@@ -1,5 +1,5 @@
 /* IRA processing allocno lives to build allocno live ranges.
-   Copyright (C) 2006-2014 Free Software Foundation, Inc.
+   Copyright (C) 2006-2015 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -21,22 +21,22 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "regs.h"
+#include "backend.h"
+#include "predict.h"
 #include "rtl.h"
+#include "df.h"
+#include "regs.h"
 #include "tm_p.h"
 #include "target.h"
 #include "flags.h"
 #include "except.h"
-#include "hard-reg-set.h"
-#include "basic-block.h"
 #include "insn-config.h"
-#include "recog.h"
 #include "diagnostic-core.h"
 #include "params.h"
-#include "df.h"
-#include "sbitmap.h"
 #include "sparseset.h"
+#include "cfgloop.h"
+#include "ira.h"
+#include "alloc-pool.h"
 #include "ira-int.h"
 
 /* The code in this file is similar to one in global but the code
@@ -345,7 +345,7 @@ mark_hard_reg_live (rtx reg)
 
   if (! TEST_HARD_REG_BIT (ira_no_alloc_regs, regno))
     {
-      int last = regno + hard_regno_nregs[regno][GET_MODE (reg)];
+      int last = END_REGNO (reg);
       enum reg_class aclass, pclass;
 
       while (regno < last)
@@ -471,7 +471,7 @@ mark_hard_reg_dead (rtx reg)
 
   if (! TEST_HARD_REG_BIT (ira_no_alloc_regs, regno))
     {
-      int last = regno + hard_regno_nregs[regno][GET_MODE (reg)];
+      int last = END_REGNO (reg);
       enum reg_class aclass, pclass;
 
       while (regno < last)
@@ -830,12 +830,13 @@ single_reg_operand_class (int op_num)
    might be used by insn reloads because the constraints are too
    strict.  */
 void
-ira_implicitly_set_insn_hard_regs (HARD_REG_SET *set)
+ira_implicitly_set_insn_hard_regs (HARD_REG_SET *set,
+				   alternative_mask preferred)
 {
   int i, c, regno = 0;
   enum reg_class cl;
   rtx op;
-  enum machine_mode mode;
+  machine_mode mode;
 
   CLEAR_HARD_REG_SET (*set);
   for (i = 0; i < recog_data.n_operands; i++)
@@ -853,7 +854,6 @@ ira_implicitly_set_insn_hard_regs (HARD_REG_SET *set)
 	  mode = (GET_CODE (op) == SCRATCH
 		  ? GET_MODE (op) : PSEUDO_REGNO_MODE (regno));
 	  cl = NO_REGS;
-	  alternative_mask preferred = preferred_alternatives;
 	  for (; (c = *p); p += CONSTRAINT_LEN (c, p))
 	    if (c == '#')
 	      preferred &= ~ALTERNATIVE_BIT (0);
@@ -921,7 +921,7 @@ process_single_reg_class_operands (bool in_p, int freq)
 		 a simplification of:
 
 		    (subreg:YMODE (reg:XMODE XREGNO) OFFSET).  */
-	      enum machine_mode ymode, xmode;
+	      machine_mode ymode, xmode;
 	      int xregno, yregno;
 	      HOST_WIDE_INT offset;
 
@@ -965,22 +965,6 @@ process_single_reg_class_operands (bool in_p, int freq)
 	    }
 	}
     }
-}
-
-/* Return true when one of the predecessor edges of BB is marked with
-   EDGE_ABNORMAL_CALL or EDGE_EH.  */
-static bool
-bb_has_abnormal_call_pred (basic_block bb)
-{
-  edge e;
-  edge_iterator ei;
-
-  FOR_EACH_EDGE (e, ei, bb->preds)
-    {
-      if (e->flags & (EDGE_ABNORMAL_CALL | EDGE_EH))
-	return true;
-    }
-  return false;
 }
 
 /* Look through the CALL_INSN_FUNCTION_USAGE of a call insn INSN, and see if
@@ -1116,6 +1100,7 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 	 pessimistic, but it probably doesn't matter much in practice.  */
       FOR_BB_INSNS_REVERSE (bb, insn)
 	{
+	  ira_allocno_t a;
 	  df_ref def, use;
 	  bool call_p;
 
@@ -1127,6 +1112,24 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 		     INSN_UID (insn), loop_tree_node->parent->loop_num,
 		     curr_point);
 
+	  call_p = CALL_P (insn);
+#ifdef REAL_PIC_OFFSET_TABLE_REGNUM
+	  int regno;
+	  bool clear_pic_use_conflict_p = false;
+	  /* Processing insn usage in call insn can create conflict
+	     with pic pseudo and pic hard reg and that is wrong.
+	     Check this situation and fix it at the end of the insn
+	     processing.  */
+	  if (call_p && pic_offset_table_rtx != NULL_RTX
+	      && (regno = REGNO (pic_offset_table_rtx)) >= FIRST_PSEUDO_REGISTER
+	      && (a = ira_curr_regno_allocno_map[regno]) != NULL)
+	    clear_pic_use_conflict_p
+		= (find_regno_fusage (insn, USE, REAL_PIC_OFFSET_TABLE_REGNUM)
+		   && ! TEST_HARD_REG_BIT (OBJECT_CONFLICT_HARD_REGS
+					   (ALLOCNO_OBJECT (a, 0)),
+					   REAL_PIC_OFFSET_TABLE_REGNUM));
+#endif
+
 	  /* Mark each defined value as live.  We need to do this for
 	     unused values because they still conflict with quantities
 	     that are live at the time of the definition.
@@ -1136,7 +1139,6 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 	     on a call-clobbered register.  Marking the register as
 	     live would stop us from allocating it to a call-crossing
 	     allocno.  */
-	  call_p = CALL_P (insn);
 	  FOR_EACH_INSN_DEF (def, insn)
 	    if (!call_p || !DF_REF_FLAGS_IS_SET (def, DF_REF_MAY_CLOBBER))
 	      mark_ref_live (def);
@@ -1200,7 +1202,7 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 	      EXECUTE_IF_SET_IN_SPARSESET (objects_live, i)
 	        {
 		  ira_object_t obj = ira_object_id_map[i];
-		  ira_allocno_t a = OBJECT_ALLOCNO (obj);
+		  a = OBJECT_ALLOCNO (obj);
 		  int num = ALLOCNO_NUM (a);
 		  HARD_REG_SET this_call_used_reg_set;
 
@@ -1250,7 +1252,7 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 	  make_early_clobber_and_input_conflicts ();
 
 	  curr_point++;
-
+	  
 	  /* Mark each used value as live.  */
 	  FOR_EACH_INSN_USE (use, insn)
 	    mark_ref_live (use);
@@ -1279,10 +1281,21 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 		}
 	    }
 
+#ifdef REAL_PIC_OFFSET_TABLE_REGNUM
+	  if (clear_pic_use_conflict_p)
+	    {
+	      regno = REGNO (pic_offset_table_rtx);
+	      a = ira_curr_regno_allocno_map[regno];
+	      CLEAR_HARD_REG_BIT (OBJECT_CONFLICT_HARD_REGS (ALLOCNO_OBJECT (a, 0)),
+				  REAL_PIC_OFFSET_TABLE_REGNUM);
+	      CLEAR_HARD_REG_BIT (OBJECT_TOTAL_CONFLICT_HARD_REGS
+				  (ALLOCNO_OBJECT (a, 0)),
+				  REAL_PIC_OFFSET_TABLE_REGNUM);
+	    }
+#endif
 	  curr_point++;
 	}
 
-#ifdef EH_RETURN_DATA_REGNO
       if (bb_has_eh_pred (bb))
 	for (j = 0; ; ++j)
 	  {
@@ -1291,7 +1304,6 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 	      break;
 	    make_hard_regno_born (regno);
 	  }
-#endif
 
       /* Allocnos can't go in stack regs at the start of a basic block
 	 that is reached by an abnormal edge. Likewise for call
@@ -1314,9 +1326,24 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 	  /* No need to record conflicts for call clobbered regs if we
 	     have nonlocal labels around, as we don't ever try to
 	     allocate such regs in this case.  */
-	  if (!cfun->has_nonlocal_label && bb_has_abnormal_call_pred (bb))
+	  if (!cfun->has_nonlocal_label
+	      && has_abnormal_call_or_eh_pred_edge_p (bb))
 	    for (px = 0; px < FIRST_PSEUDO_REGISTER; px++)
-	      if (call_used_regs[px])
+	      if (call_used_regs[px]
+#ifdef REAL_PIC_OFFSET_TABLE_REGNUM
+		  /* We should create a conflict of PIC pseudo with
+		     PIC hard reg as PIC hard reg can have a wrong
+		     value after jump described by the abnormal edge.
+		     In this case we can not allocate PIC hard reg to
+		     PIC pseudo as PIC pseudo will also have a wrong
+		     value.  This code is not critical as LRA can fix
+		     it but it is better to have the right allocation
+		     earlier.  */
+		  || (px == REAL_PIC_OFFSET_TABLE_REGNUM
+		      && pic_offset_table_rtx != NULL_RTX
+		      && REGNO (pic_offset_table_rtx) >= FIRST_PSEUDO_REGISTER)
+#endif
+		  )
 		make_hard_regno_born (px);
 	}
 

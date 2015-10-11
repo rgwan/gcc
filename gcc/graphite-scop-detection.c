@@ -1,5 +1,5 @@
 /* Detection of Static Control Parts (SCoP) for Graphite.
-   Copyright (C) 2009-2014 Free Software Foundation, Inc.
+   Copyright (C) 2009-2015 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <sebastian.pop@amd.com> and
    Tobias Grosser <grosser@fim.uni-passau.de>.
 
@@ -22,52 +22,43 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 
 #ifdef HAVE_isl
+/* Workaround for GMP 5.1.3 bug, see PR56019.  */
+#include <stddef.h>
+
+#include <isl/constraint.h>
 #include <isl/set.h>
 #include <isl/map.h>
 #include <isl/union_map.h>
-#ifdef HAVE_cloog
-#include <cloog/cloog.h>
-#include <cloog/isl/domain.h>
-#endif
-#endif
 
 #include "system.h"
 #include "coretypes.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
 #include "gimple.h"
+#include "ssa.h"
+#include "fold-const.h"
 #include "gimple-iterator.h"
-#include "gimple-ssa.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
 #include "tree-ssa-loop-manip.h"
 #include "tree-ssa-loop-niter.h"
 #include "tree-ssa-loop.h"
 #include "tree-into-ssa.h"
 #include "tree-ssa.h"
 #include "cfgloop.h"
-#include "tree-chrec.h"
 #include "tree-data-ref.h"
 #include "tree-scalar-evolution.h"
 #include "tree-pass.h"
-#include "sese.h"
-#include "tree-ssa-propagate.h"
-#include "cp/cp-tree.h"
-
-#ifdef HAVE_isl
 #include "graphite-poly.h"
+#include "tree-ssa-propagate.h"
 #include "graphite-scop-detection.h"
+#include "gimple-pretty-print.h"
 
 /* Forward declarations.  */
 static void make_close_phi_nodes_unique (basic_block);
 
 /* The type of the analyzed basic block.  */
 
-typedef enum gbb_type {
+enum gbb_type {
   GBB_UNKNOWN,
   GBB_LOOP_SING_EXIT_HEADER,
   GBB_LOOP_MULT_EXIT_HEADER,
@@ -75,7 +66,7 @@ typedef enum gbb_type {
   GBB_COND_HEADER,
   GBB_SIMPLE,
   GBB_LAST
-} gbb_type;
+};
 
 /* Detect the type of BB.  Loop headers are only marked, if they are
    new.  This means their loop_father is different to LAST_LOOP.
@@ -137,7 +128,7 @@ get_bb_type (basic_block bb, struct loop *last_loop)
      9	<- exit  */
 
 
-typedef struct sd_region_p
+struct sd_region
 {
   /* The entry bb dominates all bbs in the sd_region.  It is part of
      the region.  */
@@ -146,7 +137,7 @@ typedef struct sd_region_p
   /* The exit bb postdominates all bbs in the sd_region, but is not
      part of the region.  */
   basic_block exit;
-} sd_region;
+};
 
 
 
@@ -225,7 +216,7 @@ graphite_can_represent_scev (tree scev)
      the only nodes, which are disabled in case they are pointers to object
      types, but this can be changed.  */
 
-  if (TYPE_PTROB_P (TREE_TYPE (scev)) && TREE_CODE (scev) == SSA_NAME)
+  if (POINTER_TYPE_P (TREE_TYPE (scev)) && TREE_CODE (scev) == SSA_NAME)
     return false;
 
   switch (TREE_CODE (scev))
@@ -300,7 +291,6 @@ stmt_has_simple_data_refs_p (loop_p outermost_loop ATTRIBUTE_UNUSED,
 			     gimple stmt)
 {
   data_reference_p dr;
-  unsigned i;
   int j;
   bool res = true;
   vec<data_reference_p> drs = vNULL;
@@ -313,18 +303,29 @@ stmt_has_simple_data_refs_p (loop_p outermost_loop ATTRIBUTE_UNUSED,
 					     stmt, &drs);
 
       FOR_EACH_VEC_ELT (drs, j, dr)
-	for (i = 0; i < DR_NUM_DIMENSIONS (dr); i++)
-	  if (!graphite_can_represent_scev (DR_ACCESS_FN (dr, i)))
+	{
+	  int nb_subscripts = DR_NUM_DIMENSIONS (dr);
+	  tree ref = DR_REF (dr);
+
+	  for (int i = nb_subscripts - 1; i >= 0; i--)
 	    {
-	      res = false;
-	      goto done;
+	      if (!graphite_can_represent_scev (DR_ACCESS_FN (dr, i))
+		  || (TREE_CODE (ref) != ARRAY_REF
+		      && TREE_CODE (ref) != MEM_REF
+		      && TREE_CODE (ref) != COMPONENT_REF))
+		{
+		  free_data_refs (drs);
+		  return false;
+		}
+
+	      ref = TREE_OPERAND (ref, 0);
 	    }
+	}
 
       free_data_refs (drs);
       drs.create (0);
     }
 
- done:
   free_data_refs (drs);
   return res;
 }
@@ -350,17 +351,34 @@ stmt_simple_for_scop_p (basic_block scop_entry, loop_p outermost_loop,
       || (gimple_code (stmt) == GIMPLE_CALL
 	  && !(gimple_call_flags (stmt) & (ECF_CONST | ECF_PURE)))
       || (gimple_code (stmt) == GIMPLE_ASM))
-    return false;
+    {
+      if (dump_file && (dump_flags & TDF_DETAILS))
+	{
+	  fprintf (dump_file, "[scop-detection-fail] ");
+	  fprintf (dump_file, "Graphite cannot handle this stmt:\n");
+	  print_gimple_stmt (dump_file, stmt, 0, TDF_VOPS|TDF_MEMSYMS);
+	}
+
+      return false;
+    }
 
   if (is_gimple_debug (stmt))
     return true;
 
   if (!stmt_has_simple_data_refs_p (outermost_loop, stmt))
-    return false;
+    {
+      if (dump_file && (dump_flags & TDF_DETAILS))
+	{
+	  fprintf (dump_file, "[scop-detection-fail] ");
+	  fprintf (dump_file, "Graphite cannot handle data-refs in stmt:\n");
+	  print_gimple_stmt (dump_file, stmt, 0, TDF_VOPS|TDF_MEMSYMS);
+	}
+
+      return false;
+    }
 
   switch (gimple_code (stmt))
     {
-    case GIMPLE_RETURN:
     case GIMPLE_LABEL:
       return true;
 
@@ -376,15 +394,33 @@ stmt_simple_for_scop_p (basic_block scop_entry, loop_p outermost_loop,
 	      || code == GE_EXPR
 	      || code == EQ_EXPR
 	      || code == NE_EXPR))
-          return false;
+          {
+	    if (dump_file && (dump_flags & TDF_DETAILS))
+	      {
+		fprintf (dump_file, "[scop-detection-fail] ");
+		fprintf (dump_file, "Graphite cannot handle cond stmt:\n");
+		print_gimple_stmt (dump_file, stmt, 0, TDF_VOPS|TDF_MEMSYMS);
+	      }
+
+	    return false;
+	  }
 
 	for (unsigned i = 0; i < 2; ++i)
 	  {
 	    tree op = gimple_op (stmt, i);
 	    if (!graphite_can_represent_expr (scop_entry, loop, op)
-		/* We can not handle REAL_TYPE. Failed for pr39260.  */
-		|| TREE_CODE (TREE_TYPE (op)) == REAL_TYPE)
-	      return false;
+		/* We can only constrain on integer type.  */
+		|| (TREE_CODE (TREE_TYPE (op)) != INTEGER_TYPE))
+	      {
+		if (dump_file && (dump_flags & TDF_DETAILS))
+		  {
+		    fprintf (dump_file, "[scop-detection-fail] ");
+		    fprintf (dump_file, "Graphite cannot represent stmt:\n");
+		    print_gimple_stmt (dump_file, stmt, 0, TDF_VOPS|TDF_MEMSYMS);
+		  }
+
+		return false;
+	      }
 	  }
 
 	return true;
@@ -396,6 +432,12 @@ stmt_simple_for_scop_p (basic_block scop_entry, loop_p outermost_loop,
 
     default:
       /* These nodes cut a new scope.  */
+      if (dump_file && (dump_flags & TDF_DETAILS))
+	{
+	  fprintf (dump_file, "[scop-detection-fail] ");
+	  fprintf (dump_file, "Gimple stmt not handled in Graphite:\n");
+	  print_gimple_stmt (dump_file, stmt, 0, TDF_VOPS|TDF_MEMSYMS);
+	}
       return false;
     }
 
@@ -489,7 +531,16 @@ scopdet_basic_block_info (basic_block bb, loop_p outermost_loop,
 	 with make_forwarder_block.  */
       if (!single_succ_p (bb)
 	  || bb_has_abnormal_pred (single_succ (bb)))
-	result.difficult = true;
+	{
+	  if (dump_file && (dump_flags & TDF_DETAILS))
+	    {
+	      fprintf (dump_file, "[scop-detection-fail] ");
+	      fprintf (dump_file, "BB %d cannot be part of a scop.\n",
+		       bb->index);
+	    }
+
+	  result.difficult = true;
+	}
       else
 	result.exit = single_succ (bb);
 
@@ -510,7 +561,15 @@ scopdet_basic_block_info (basic_block bb, loop_p outermost_loop,
 	sinfo = build_scops_1 (bb, outermost_loop, &regions, loop);
 
 	if (!graphite_can_represent_loop (entry_block, loop))
-	  result.difficult = true;
+	  {
+	    if (dump_file && (dump_flags & TDF_DETAILS))
+	      {
+		fprintf (dump_file, "[scop-detection-fail] ");
+		fprintf (dump_file, "Graphite cannot represent loop %d.\n",
+			 loop->num);
+	      }
+	    result.difficult = true;
+	  }
 
 	result.difficult |= sinfo.difficult;
 
@@ -806,7 +865,14 @@ build_scops_1 (basic_block current, loop_p outermost_loop,
     {
       open_scop.exit = sinfo.exit;
       gcc_assert (open_scop.exit);
-      scops->safe_push (open_scop);
+      if (open_scop.entry != open_scop.exit)
+	scops->safe_push (open_scop);
+      else
+	{
+	  sinfo.difficult = true;
+	  sinfo.exits = false;
+	  sinfo.exit = NULL;
+	}
     }
 
   result.exit = sinfo.exit;
@@ -1255,7 +1321,7 @@ limit_scops (vec<scop_p> *scops)
    argument.  */
 
 static inline bool
-same_close_phi_node (gimple p1, gimple p2)
+same_close_phi_node (gphi *p1, gphi *p2)
 {
   return operand_equal_p (gimple_phi_arg_def (p1, 0),
 			  gimple_phi_arg_def (p2, 0), 0);
@@ -1265,15 +1331,15 @@ same_close_phi_node (gimple p1, gimple p2)
    of PHI.  */
 
 static void
-remove_duplicate_close_phi (gimple phi, gimple_stmt_iterator *gsi)
+remove_duplicate_close_phi (gphi *phi, gphi_iterator *gsi)
 {
   gimple use_stmt;
   use_operand_p use_p;
   imm_use_iterator imm_iter;
   tree res = gimple_phi_result (phi);
-  tree def = gimple_phi_result (gsi_stmt (*gsi));
+  tree def = gimple_phi_result (gsi->phi ());
 
-  gcc_assert (same_close_phi_node (phi, gsi_stmt (*gsi)));
+  gcc_assert (same_close_phi_node (phi, gsi->phi ()));
 
   FOR_EACH_IMM_USE_STMT (use_stmt, imm_iter, def)
     {
@@ -1298,12 +1364,12 @@ remove_duplicate_close_phi (gimple phi, gimple_stmt_iterator *gsi)
 static void
 make_close_phi_nodes_unique (basic_block bb)
 {
-  gimple_stmt_iterator psi;
+  gphi_iterator psi;
 
   for (psi = gsi_start_phis (bb); !gsi_end_p (psi); gsi_next (&psi))
     {
-      gimple_stmt_iterator gsi = psi;
-      gimple phi = gsi_stmt (psi);
+      gphi_iterator gsi = psi;
+      gphi *phi = psi.phi ();
 
       /* At this point, PHI should be a close phi in normal form.  */
       gcc_assert (gimple_phi_num_args (phi) == 1);
@@ -1311,7 +1377,7 @@ make_close_phi_nodes_unique (basic_block bb)
       /* Iterate over the next phis and remove duplicates.  */
       gsi_next (&gsi);
       while (!gsi_end_p (gsi))
-	if (same_close_phi_node (phi, gsi_stmt (gsi)))
+	if (same_close_phi_node (phi, gsi.phi ()))
 	  remove_duplicate_close_phi (phi, &gsi);
 	else
 	  gsi_next (&gsi);
@@ -1338,14 +1404,14 @@ canonicalize_loop_closed_ssa (loop_p loop)
     }
   else
     {
-      gimple_stmt_iterator psi;
+      gphi_iterator psi;
       basic_block close = split_edge (e);
 
       e = single_succ_edge (close);
 
       for (psi = gsi_start_phis (bb); !gsi_end_p (psi); gsi_next (&psi))
 	{
-	  gimple phi = gsi_stmt (psi);
+	  gphi *phi = psi.phi ();
 	  unsigned i;
 
 	  for (i = 0; i < gimple_phi_num_args (phi); i++)
@@ -1353,7 +1419,7 @@ canonicalize_loop_closed_ssa (loop_p loop)
 	      {
 		tree res, arg = gimple_phi_arg_def (phi, i);
 		use_operand_p use_p;
-		gimple close_phi;
+		gphi *close_phi;
 
 		if (TREE_CODE (arg) != SSA_NAME)
 		  continue;
@@ -1639,4 +1705,4 @@ dot_scop (scop_p scop)
 #endif
 }
 
-#endif
+#endif  /* HAVE_isl */

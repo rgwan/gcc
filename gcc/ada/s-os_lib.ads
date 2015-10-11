@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1995-2014, Free Software Foundation, Inc.         --
+--          Copyright (C) 1995-2015, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -856,6 +856,15 @@ package System.OS_Lib is
    --  This function will always return Invalid_Pid under VxWorks, since there
    --  is no notion of executables under this OS.
 
+   function Non_Blocking_Spawn
+     (Program_Name : String;
+      Args         : Argument_List;
+      Stdout_File  : String;
+      Stderr_File  : String) return Process_Id;
+   --  Similar to the procedure above, but saves the standard output of the
+   --  command to a file with the name Stdout_File and the standard output
+   --  of the command to a file with the name Stderr_File.
+
    procedure Wait_Process (Pid : out Process_Id; Success : out Boolean);
    --  Wait for the completion of any of the processes created by previous
    --  calls to Non_Blocking_Spawn. The caller will be suspended until one of
@@ -901,7 +910,7 @@ package System.OS_Lib is
    --     On other Unix-like systems: fork, followed in the child
    --     process by execv.
 
-   --     On vxworks, nucleus, and RTX, spawning of processes is not supported
+   --     On vxworks, spawning of processes is not supported
 
    --  For details, look at the functions __gnat_portable_spawn and
    --  __gnat_portable_no_block_spawn in adaint.c.

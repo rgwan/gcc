@@ -1,5 +1,5 @@
 /* Single entry single exit control flow regions.
-   Copyright (C) 2008-2014 Free Software Foundation, Inc.
+   Copyright (C) 2008-2015 Free Software Foundation, Inc.
    Contributed by Jan Sjodin <jan.sjodin@amd.com> and
    Sebastian Pop <sebastian.pop@amd.com>.
 
@@ -22,26 +22,23 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "hash-map.h"
+#include "alias.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "options.h"
+#include "fold-const.h"
 #include "tree-pretty-print.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
 #include "gimple-fold.h"
 #include "tree-eh.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimplify.h"
 #include "gimple-iterator.h"
 #include "gimplify-me.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-ssa-loop.h"
 #include "tree-into-ssa.h"
 #include "cfgloop.h"
@@ -52,6 +49,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "value-prof.h"
 #include "sese.h"
 #include "tree-ssa-propagate.h"
+#include "tree-hash-traits.h"
 
 /* Helper function for debug_rename_map.  */
 
@@ -67,23 +65,7 @@ debug_rename_map_1 (tree_node *const &old_name, tree_node *const &expr,
   return true;
 }
 
-
-/* Hashtable helpers.  */
-
-struct rename_map_hasher : default_hashmap_traits
-{
-  static inline hashval_t hash (tree);
-};
-
-/* Computes a hash function for database element ELT.  */
-
-inline hashval_t
-rename_map_hasher::hash (tree old_name)
-{
-  return SSA_NAME_VERSION (old_name);
-}
-
-typedef hash_map<tree, tree, rename_map_hasher> rename_map_type;
+typedef hash_map<tree_ssa_name_hash, tree> rename_map_type;
 
 
 /* Print to stderr all the elements of RENAME_MAP.  */
@@ -175,18 +157,19 @@ sese_build_liveouts_use (sese region, bitmap liveouts, basic_block bb,
 static void
 sese_build_liveouts_bb (sese region, bitmap liveouts, basic_block bb)
 {
-  gimple_stmt_iterator bsi;
   edge e;
   edge_iterator ei;
   ssa_op_iter iter;
   use_operand_p use_p;
 
   FOR_EACH_EDGE (e, ei, bb->succs)
-    for (bsi = gsi_start_phis (e->dest); !gsi_end_p (bsi); gsi_next (&bsi))
+    for (gphi_iterator bsi = gsi_start_phis (e->dest); !gsi_end_p (bsi);
+	 gsi_next (&bsi))
       sese_build_liveouts_use (region, liveouts, bb,
-			       PHI_ARG_DEF_FROM_EDGE (gsi_stmt (bsi), e));
+			       PHI_ARG_DEF_FROM_EDGE (bsi.phi (), e));
 
-  for (bsi = gsi_start_bb (bb); !gsi_end_p (bsi); gsi_next (&bsi))
+  for (gimple_stmt_iterator bsi = gsi_start_bb (bb); !gsi_end_p (bsi);
+       gsi_next (&bsi))
     {
       gimple stmt = gsi_stmt (bsi);
 
@@ -307,7 +290,7 @@ free_sese (sese region)
 static void
 sese_add_exit_phis_edge (basic_block exit, tree use, edge false_e, edge true_e)
 {
-  gimple phi = create_phi_node (NULL_TREE, exit);
+  gphi *phi = create_phi_node (NULL_TREE, exit);
   create_new_def_for (use, phi, gimple_phi_result_ptr (phi));
   add_phi_arg (phi, use, false_e, UNKNOWN_LOCATION);
   add_phi_arg (phi, use, true_e, UNKNOWN_LOCATION);
@@ -726,7 +709,7 @@ set_ifsese_condition (ifsese if_region, tree condition)
   basic_block bb = entry->dest;
   gimple last = last_stmt (bb);
   gimple_stmt_iterator gsi = gsi_last_bb (bb);
-  gimple cond_stmt;
+  gcond *cond_stmt;
 
   gcc_assert (gimple_code (last) == GIMPLE_COND);
 

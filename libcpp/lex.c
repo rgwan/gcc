@@ -1,5 +1,5 @@
 /* CPP Library - lexical analysis.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
    Contributed by Per Bothner, 1994-95.
    Based on CCCP program by Paul Rubin, June 1986
    Adapted to ANSI C, Richard Stallman, Jan 1987
@@ -270,7 +270,7 @@ search_line_acc_char (const uchar *s, const uchar *end ATTRIBUTE_UNUSED)
    extensions used, so SSE4.2 executables cannot run on machines that
    don't support that extension.  */
 
-#if (GCC_VERSION >= 4005) && (defined(__i386__) || defined(__x86_64__)) && !(defined(__sun__) && defined(__svr4__))
+#if (GCC_VERSION >= 4005) && (__GNUC__ >= 5 || !defined(__PIC__)) && (defined(__i386__) || defined(__x86_64__)) && !(defined(__sun__) && defined(__svr4__))
 
 /* Replicated character data to be shared between implementations.
    Recall that outside of a context with vector support we can't
@@ -450,15 +450,33 @@ search_line_sse42 (const uchar *s, const uchar *end)
       s = (const uchar *)((si + 16) & -16);
     }
 
-  /* Main loop, processing 16 bytes at a time.  By doing the whole loop
-     in inline assembly, we can make proper use of the flags set.  */
-  __asm (      "sub $16, %1\n"
-	"	.balign 16\n"
+  /* Main loop, processing 16 bytes at a time.  */
+#ifdef __GCC_ASM_FLAG_OUTPUTS__
+  while (1)
+    {
+      char f;
+
+      /* By using inline assembly instead of the builtin,
+	 we can use the result, as well as the flags set.  */
+      __asm ("%vpcmpestri\t$0, %2, %3"
+	     : "=c"(index), "=@ccc"(f)
+	     : "m"(*s), "x"(search), "a"(4), "d"(16));
+      if (f)
+	break;
+      
+      s += 16;
+    }
+#else
+  s -= 16;
+  /* By doing the whole loop in inline assembly,
+     we can make proper use of the flags set.  */
+  __asm (      ".balign 16\n"
 	"0:	add $16, %1\n"
-	"	%vpcmpestri $0, (%1), %2\n"
+	"	%vpcmpestri\t$0, (%1), %2\n"
 	"	jnc 0b"
 	: "=&c"(index), "+r"(s)
 	: "x"(search), "a"(4), "d"(16));
+#endif
 
  found:
   return s + index;
@@ -519,6 +537,7 @@ init_vectorized_lexer (void)
    and VSX unaligned loads (when VSX is available).  This is otherwise
    the same as the pre-GCC 5 version.  */
 
+ATTRIBUTE_NO_SANITIZE_UNDEFINED
 static const uchar *
 search_line_fast (const uchar *s, const uchar *end ATTRIBUTE_UNUSED)
 {
@@ -731,7 +750,7 @@ search_line_fast (const uchar *s, const uchar *end ATTRIBUTE_UNUSED)
   }
 }
 
-#elif defined (__ARM_NEON__)
+#elif defined (__ARM_NEON)
 #include "arm_neon.h"
 
 static const uchar *
@@ -1225,9 +1244,10 @@ forms_identifier_p (cpp_reader *pfile, int first,
       && *buffer->cur == '\\'
       && (buffer->cur[1] == 'u' || buffer->cur[1] == 'U'))
     {
+      cppchar_t s;
       buffer->cur += 2;
       if (_cpp_valid_ucn (pfile, &buffer->cur, buffer->rlimit, 1 + !first,
-			  state))
+			  state, &s))
 	return true;
       buffer->cur -= 2;
     }
@@ -1302,7 +1322,7 @@ _cpp_lex_identifier (cpp_reader *pfile, const char *name)
 /* Lex an identifier starting at BUFFER->CUR - 1.  */
 static cpp_hashnode *
 lex_identifier (cpp_reader *pfile, const uchar *base, bool starts_ucn,
-		struct normalize_state *nst)
+		struct normalize_state *nst, cpp_hashnode **spelling)
 {
   cpp_hashnode *result;
   const uchar *cur;
@@ -1332,6 +1352,7 @@ lex_identifier (cpp_reader *pfile, const uchar *base, bool starts_ucn,
       } while (forms_identifier_p (pfile, false, nst));
       result = _cpp_interpret_identifier (pfile, base,
 					  pfile->buffer->cur - base);
+      *spelling = cpp_lookup (pfile, base, pfile->buffer->cur - base);
     }
   else
     {
@@ -1340,6 +1361,7 @@ lex_identifier (cpp_reader *pfile, const uchar *base, bool starts_ucn,
 
       result = CPP_HASHNODE (ht_lookup_with_hash (pfile->hash_table,
 						  base, len, hash, HT_ALLOC));
+      *spelling = result;
     }
 
   /* Rarely, identifiers require diagnostics when lexed.  */
@@ -1397,6 +1419,9 @@ lex_number (cpp_reader *pfile, cpp_string *number,
 	  NORMALIZE_STATE_UPDATE_IDNUM (nst, *cur);
 	  cur++;
 	}
+      /* A number can't end with a digit separator.  */
+      while (cur > pfile->buffer->cur && DIGIT_SEP (cur[-1]))
+	--cur;
 
       pfile->buffer->cur = cur;
     }
@@ -1834,7 +1859,8 @@ lex_string (cpp_reader *pfile, cpp_token *token, const uchar *base)
   else if (terminator == '\'')
     type = (*base == 'L' ? CPP_WCHAR :
 	    *base == 'U' ? CPP_CHAR32 :
-	    *base == 'u' ? CPP_CHAR16 : CPP_CHAR);
+	    *base == 'u' ? (base[1] == '8' ? CPP_UTF8CHAR : CPP_CHAR16)
+			 : CPP_CHAR);
   else
     terminator = '>', type = CPP_HEADER_NAME;
 
@@ -1899,6 +1925,12 @@ lex_string (cpp_reader *pfile, cpp_token *token, const uchar *base)
 	    ++cur;
 	}
     }
+  else if (CPP_OPTION (pfile, cpp_warn_cxx11_compat)
+	   && is_macro (pfile, cur)
+	   && !pfile->state.skipping)
+    cpp_warning_with_line (pfile, CPP_W_CXX11_COMPAT,
+			   token->src_loc, 0, "C++11 requires a space "
+			   "between string literal and macro");
 
   pfile->buffer->cur = cur;
   create_literal (pfile, token, base, cur - base, type);
@@ -2074,16 +2106,26 @@ cpp_peek_token (cpp_reader *pfile, int index)
   count = index;
   pfile->keep_tokens++;
 
+  /* For peeked tokens temporarily disable line_change reporting,
+     until the tokens are parsed for real.  */
+  void (*line_change) (cpp_reader *, const cpp_token *, int)
+    = pfile->cb.line_change;
+  pfile->cb.line_change = NULL;
+
   do
     {
       peektok = _cpp_lex_token (pfile);
       if (peektok->type == CPP_EOF)
-	return peektok;
+	{
+	  index--;
+	  break;
+	}
     }
   while (index--);
 
-  _cpp_backup_tokens_direct (pfile, count + 1);
+  _cpp_backup_tokens_direct (pfile, count - index);
   pfile->keep_tokens--;
+  pfile->cb.line_change = line_change;
 
   return peektok;
 }
@@ -2363,7 +2405,8 @@ _cpp_lex_direct (cpp_reader *pfile)
 		  && CPP_OPTION (pfile, rliterals))
 	      || (*buffer->cur == '8'
 		  && c == 'u'
-		  && (buffer->cur[1] == '"'
+		  && ((buffer->cur[1] == '"' || (buffer->cur[1] == '\''
+				&& CPP_OPTION (pfile, utf8_char_literals)))
 		      || (buffer->cur[1] == 'R' && buffer->cur[2] == '"'
 			  && CPP_OPTION (pfile, rliterals)))))
 	    {
@@ -2388,7 +2431,8 @@ _cpp_lex_direct (cpp_reader *pfile)
       {
 	struct normalize_state nst = INITIAL_NORMALIZE_STATE;
 	result->val.node.node = lex_identifier (pfile, buffer->cur - 1, false,
-						&nst);
+						&nst,
+						&result->val.node.spelling);
 	warn_about_normalization (pfile, result, &nst);
       }
 
@@ -2666,7 +2710,8 @@ _cpp_lex_direct (cpp_reader *pfile)
 	if (forms_identifier_p (pfile, true, &nst))
 	  {
 	    result->type = CPP_NAME;
-	    result->val.node.node = lex_identifier (pfile, base, true, &nst);
+	    result->val.node.node = lex_identifier (pfile, base, true, &nst,
+						    &result->val.node.spelling);
 	    warn_about_normalization (pfile, result, &nst);
 	    break;
 	  }
@@ -2740,11 +2785,35 @@ cpp_digraph2name (enum cpp_ttype type)
   return digraph_spellings[(int) type - (int) CPP_FIRST_DIGRAPH];
 }
 
+/* Write the spelling of an identifier IDENT, using UCNs, to BUFFER.
+   The buffer must already contain the enough space to hold the
+   token's spelling.  Returns a pointer to the character after the
+   last character written.  */
+unsigned char *
+_cpp_spell_ident_ucns (unsigned char *buffer, cpp_hashnode *ident)
+{
+  size_t i;
+  const unsigned char *name = NODE_NAME (ident);
+	  
+  for (i = 0; i < NODE_LEN (ident); i++)
+    if (name[i] & ~0x7F)
+      {
+	i += utf8_to_ucn (buffer, name + i) - 1;
+	buffer += 10;
+      }
+    else
+      *buffer++ = name[i];
+
+  return buffer;
+}
+
 /* Write the spelling of a token TOKEN to BUFFER.  The buffer must
    already contain the enough space to hold the token's spelling.
    Returns a pointer to the character after the last character written.
    FORSTRING is true if this is to be the spelling after translation
-   phase 1 (this is different for UCNs).
+   phase 1 (with the original spelling of extended identifiers), false
+   if extended identifiers should always be written using UCNs (there is
+   no option for always writing them in the internal UTF-8 form).
    FIXME: Would be nice if we didn't need the PFILE argument.  */
 unsigned char *
 cpp_spell_token (cpp_reader *pfile, const cpp_token *token,
@@ -2773,24 +2842,12 @@ cpp_spell_token (cpp_reader *pfile, const cpp_token *token,
     case SPELL_IDENT:
       if (forstring)
 	{
-	  memcpy (buffer, NODE_NAME (token->val.node.node),
-		  NODE_LEN (token->val.node.node));
-	  buffer += NODE_LEN (token->val.node.node);
+	  memcpy (buffer, NODE_NAME (token->val.node.spelling),
+		  NODE_LEN (token->val.node.spelling));
+	  buffer += NODE_LEN (token->val.node.spelling);
 	}
       else
-	{
-	  size_t i;
-	  const unsigned char * name = NODE_NAME (token->val.node.node);
-	  
-	  for (i = 0; i < NODE_LEN (token->val.node.node); i++)
-	    if (name[i] & ~0x7F)
-	      {
-		i += utf8_to_ucn (buffer, name + i) - 1;
-		buffer += 10;
-	      }
-	    else
-	      *buffer++ = NODE_NAME (token->val.node.node)[i];
-	}
+	buffer = _cpp_spell_ident_ucns (buffer, token->val.node.node);
       break;
 
     case SPELL_LITERAL:
@@ -2904,9 +2961,11 @@ _cpp_equiv_tokens (const cpp_token *a, const cpp_token *b)
 	return (a->type != CPP_PASTE || a->val.token_no == b->val.token_no);
       case SPELL_NONE:
 	return (a->type != CPP_MACRO_ARG
-		|| a->val.macro_arg.arg_no == b->val.macro_arg.arg_no);
+		|| (a->val.macro_arg.arg_no == b->val.macro_arg.arg_no
+		    && a->val.macro_arg.spelling == b->val.macro_arg.spelling));
       case SPELL_IDENT:
-	return a->val.node.node == b->val.node.node;
+	return (a->val.node.node == b->val.node.node
+		&& a->val.node.spelling == b->val.node.spelling);
       case SPELL_LITERAL:
 	return (a->val.str.len == b->val.str.len
 		&& !memcmp (a->val.str.text, b->val.str.text,

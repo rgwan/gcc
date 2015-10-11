@@ -1,5 +1,5 @@
 /* DDG - Data Dependence Graph implementation.
-   Copyright (C) 2004-2014 Free Software Foundation, Inc.
+   Copyright (C) 2004-2015 Free Software Foundation, Inc.
    Contributed by Ayal Zaks and Mustafa Hagog <zaks,mustafa@il.ibm.com>
 
 This file is part of GCC.
@@ -22,18 +22,13 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "diagnostic-core.h"
+#include "backend.h"
+#include "tree.h"
 #include "rtl.h"
+#include "df.h"
+#include "diagnostic-core.h"
 #include "tm_p.h"
-#include "hard-reg-set.h"
 #include "regs.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
 #include "flags.h"
 #include "insn-config.h"
 #include "insn-attr.h"
@@ -42,9 +37,15 @@ along with GCC; see the file COPYING3.  If not see
 #include "sched-int.h"
 #include "target.h"
 #include "cfgloop.h"
-#include "sbitmap.h"
+#include "alias.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
-#include "bitmap.h"
 #include "ddg.h"
 #include "rtl-iter.h"
 
@@ -74,7 +75,7 @@ mark_mem_use (rtx *x, void *)
 {
   subrtx_iterator::array_type array;
   FOR_EACH_SUBRTX (iter, array, *x, NONCONST)
-    if (MEM_P (*x))
+    if (MEM_P (*iter))
       {
 	mem_ref_p = true;
 	break;
@@ -176,7 +177,7 @@ def_has_ccmode_p (rtx_insn *insn)
 
   FOR_EACH_INSN_DEF (def, insn)
     {
-      enum machine_mode mode = GET_MODE (DF_REF_REG (def));
+      machine_mode mode = GET_MODE (DF_REF_REG (def));
 
       if (GET_MODE_CLASS (mode) == MODE_CC)
 	return true;

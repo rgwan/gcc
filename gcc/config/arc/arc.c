@@ -1,5 +1,5 @@
 /* Subroutines used for code generation on the Synopsys DesignWare ARC cpu.
-   Copyright (C) 1994-2014 Free Software Foundation, Inc.
+   Copyright (C) 1994-2015 Free Software Foundation, Inc.
 
    Sources derived from work done by Sankhya Technologies (www.sankhya.com) on
    behalf of Synopsys Inc.
@@ -31,32 +31,32 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "rtl.h"
+#include "df.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "varasm.h"
 #include "stor-layout.h"
 #include "stringpool.h"
 #include "calls.h"
-#include "rtl.h"
 #include "regs.h"
-#include "hard-reg-set.h"
-#include "real.h"
 #include "insn-config.h"
 #include "conditions.h"
 #include "insn-flags.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
 #include "toplev.h"
-#include "ggc.h"
 #include "tm_p.h"
 #include "target.h"
 #include "output.h"
 #include "insn-attr.h"
 #include "flags.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "emit-rtl.h"
+#include "stmt.h"
 #include "expr.h"
 #include "recog.h"
 #include "debug.h"
@@ -66,12 +66,16 @@ along with GCC; see the file COPYING3.  If not see
 #include "optabs.h"
 #include "tm-constrs.h"
 #include "reload.h" /* For operands_match_p */
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "lcm.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "tree-pass.h"
 #include "context.h"
 #include "pass_manager.h"
-#include "wide-int.h"
 #include "builtins.h"
+#include "rtl-iter.h"
 
 /* Which cpu we're compiling for (A5, ARC600, ARC601, ARC700).  */
 static const char *arc_cpu_string = "";
@@ -376,16 +380,16 @@ static void arc_file_start (void);
 static void arc_internal_label (FILE *, const char *, unsigned long);
 static void arc_output_mi_thunk (FILE *, tree, HOST_WIDE_INT, HOST_WIDE_INT,
 				 tree);
-static int arc_address_cost (rtx, enum machine_mode, addr_space_t, bool);
+static int arc_address_cost (rtx, machine_mode, addr_space_t, bool);
 static void arc_encode_section_info (tree decl, rtx rtl, int first);
 
 static void arc_init_builtins (void);
-static rtx arc_expand_builtin (tree, rtx, rtx, enum machine_mode, int);
+static rtx arc_expand_builtin (tree, rtx, rtx, machine_mode, int);
 
 static int branch_dest (rtx);
 
 static void  arc_output_pic_addr_const (FILE *,  rtx, int);
-void emit_pic_move (rtx *, enum machine_mode);
+void emit_pic_move (rtx *, machine_mode);
 bool arc_legitimate_pic_operand_p (rtx);
 static bool arc_function_ok_for_sibcall (tree, tree);
 static rtx arc_function_value (const_tree, const_tree, bool);
@@ -396,7 +400,7 @@ static bool arc_in_small_data_p (const_tree);
 static void arc_init_reg_tables (void);
 static bool arc_return_in_memory (const_tree, const_tree);
 static void arc_init_simd_builtins (void);
-static bool arc_vector_mode_supported_p (enum machine_mode);
+static bool arc_vector_mode_supported_p (machine_mode);
 
 static bool arc_can_use_doloop_p (const widest_int &, const widest_int &,
 				  unsigned int, bool);
@@ -406,10 +410,15 @@ static void output_short_suffix (FILE *file);
 
 static bool arc_frame_pointer_required (void);
 
+static bool arc_use_by_pieces_infrastructure_p (unsigned HOST_WIDE_INT,
+						unsigned int,
+						enum by_pieces_operation op,
+						bool);
+
 /* Implements target hook vector_mode_supported_p.  */
 
 static bool
-arc_vector_mode_supported_p (enum machine_mode mode)
+arc_vector_mode_supported_p (machine_mode mode)
 {
   if (!TARGET_SIMD_SET)
     return false;
@@ -429,9 +438,9 @@ static bool arc_can_follow_jump (const rtx_insn *follower,
 				 const rtx_insn *followee);
 
 static rtx frame_insn (rtx);
-static void arc_function_arg_advance (cumulative_args_t, enum machine_mode,
+static void arc_function_arg_advance (cumulative_args_t, machine_mode,
 				      const_tree, bool);
-static rtx arc_legitimize_address_0 (rtx, rtx, enum machine_mode mode);
+static rtx arc_legitimize_address_0 (rtx, rtx, machine_mode mode);
 
 static void arc_finalize_pic (void);
 
@@ -521,6 +530,10 @@ static void arc_finalize_pic (void);
 #undef TARGET_DELEGITIMIZE_ADDRESS
 #define TARGET_DELEGITIMIZE_ADDRESS arc_delegitimize_address
 
+#undef TARGET_USE_BY_PIECES_INFRASTRUCTURE_P
+#define TARGET_USE_BY_PIECES_INFRASTRUCTURE_P \
+  arc_use_by_pieces_infrastructure_p
+
 /* Usually, we will be able to scale anchor offsets.
    When this fails, we want LEGITIMIZE_ADDRESS to kick in.  */
 #undef TARGET_MIN_ANCHOR_OFFSET
@@ -593,7 +606,7 @@ arc_sched_adjust_priority (rtx_insn *insn, int priority)
 }
 
 static reg_class_t
-arc_secondary_reload (bool in_p, rtx x, reg_class_t cl, enum machine_mode,
+arc_secondary_reload (bool in_p, rtx x, reg_class_t cl, machine_mode,
 		      secondary_reload_info *)
 {
   if (cl == DOUBLE_REGS)
@@ -987,10 +1000,10 @@ arc_short_comparison_p (rtx comparison, int offset)
 /* Given a comparison code (EQ, NE, etc.) and the first operand of a COMPARE,
    return the mode to be used for the comparison.  */
 
-enum machine_mode
+machine_mode
 arc_select_cc_mode (enum rtx_code op, rtx x, rtx y)
 {
-  enum machine_mode mode = GET_MODE (x);
+  machine_mode mode = GET_MODE (x);
   rtx x1;
 
   /* For an operation that sets the condition codes as a side-effect, the
@@ -1141,7 +1154,7 @@ arc_init_reg_tables (void)
 
   for (i = 0; i < NUM_MACHINE_MODES; i++)
     {
-      enum machine_mode m = (enum machine_mode) i;
+      machine_mode m = (machine_mode) i;
 
       switch (GET_MODE_CLASS (m))
 	{
@@ -1481,13 +1494,13 @@ arc_set_default_type_attributes (tree type ATTRIBUTE_UNUSED)
    return the rtx for the cc reg in the proper mode.  */
 
 rtx
-gen_compare_reg (rtx comparison, enum machine_mode omode)
+gen_compare_reg (rtx comparison, machine_mode omode)
 {
   enum rtx_code code = GET_CODE (comparison);
   rtx x = XEXP (comparison, 0);
   rtx y = XEXP (comparison, 1);
   rtx tmp, cc_reg;
-  enum machine_mode mode, cmode;
+  machine_mode mode, cmode;
 
 
   cmode = GET_MODE (x);
@@ -1552,7 +1565,7 @@ gen_compare_reg (rtx comparison, enum machine_mode omode)
       }
 
       if (mode != CC_FPXmode)
-	emit_insn (gen_rtx_SET (VOIDmode, cc_reg,
+	emit_insn (gen_rtx_SET (cc_reg,
 				gen_rtx_COMPARE (mode,
 						 gen_rtx_REG (CC_FPXmode, 61),
 						 const0_rtx)));
@@ -1589,8 +1602,7 @@ gen_compare_reg (rtx comparison, enum machine_mode omode)
       emit_insn (gen_cmp_float (cc_reg, gen_rtx_COMPARE (mode, op0, op1)));
     }
   else
-    emit_insn (gen_rtx_SET (omode, cc_reg,
-			    gen_rtx_COMPARE (mode, x, y)));
+    emit_insn (gen_rtx_SET (cc_reg, gen_rtx_COMPARE (mode, x, y)));
   return gen_rtx_fmt_ee (code, omode, cc_reg, const0_rtx);
 }
 
@@ -1632,7 +1644,7 @@ arc_double_limm_p (rtx value)
 
 static void
 arc_setup_incoming_varargs (cumulative_args_t args_so_far,
-			    enum machine_mode mode, tree type,
+			    machine_mode mode, tree type,
 			    int *pretend_size, int no_rtl)
 {
   int first_anon_arg;
@@ -1671,7 +1683,7 @@ arc_setup_incoming_varargs (cumulative_args_t args_so_far,
    If ADDR is not a valid address, its cost is irrelevant.  */
 
 int
-arc_address_cost (rtx addr, enum machine_mode, addr_space_t, bool speed)
+arc_address_cost (rtx addr, machine_mode, addr_space_t, bool speed)
 {
   switch (GET_CODE (addr))
     {
@@ -1746,7 +1758,7 @@ frame_insn (rtx x)
 static rtx
 frame_move (rtx dst, rtx src)
 {
-  return frame_insn (gen_rtx_SET (VOIDmode, dst, src));
+  return frame_insn (gen_rtx_SET (dst, src));
 }
 
 /* Like frame_move, but add a REG_INC note for REG if ADDR contains an
@@ -2160,9 +2172,9 @@ arc_save_restore (rtx base_reg,
 		= gen_frame_mem (SImode, plus_constant (Pmode, base_reg, off));
 
 	      if (epilogue_p)
-		XVECEXP (insn, 0, i) = gen_rtx_SET (VOIDmode, reg, mem);
+		XVECEXP (insn, 0, i) = gen_rtx_SET (reg, mem);
 	      else
-		XVECEXP (insn, 0, i) = gen_rtx_SET (VOIDmode, mem, reg);
+		XVECEXP (insn, 0, i) = gen_rtx_SET (mem, reg);
 	      gmask = gmask & ~(1L << r);
 	    }
 	  if (epilogue_p == 2)
@@ -2204,10 +2216,10 @@ arc_save_restore (rtx base_reg,
     {
       rtx r12 = gen_rtx_REG (Pmode, 12);
 
-      frame_insn (gen_rtx_SET (VOIDmode, r12, GEN_INT (offset)));
+      frame_insn (gen_rtx_SET (r12, GEN_INT (offset)));
       XVECEXP (sibthunk_insn, 0, 0) = ret_rtx;
       XVECEXP (sibthunk_insn, 0, 1)
-	= gen_rtx_SET (VOIDmode, stack_pointer_rtx,
+	= gen_rtx_SET (stack_pointer_rtx,
 		       gen_rtx_PLUS (Pmode, stack_pointer_rtx, r12));
       sibthunk_insn = emit_jump_insn (sibthunk_insn);
       RTX_FRAME_RELATED_P (sibthunk_insn) = 1;
@@ -2519,7 +2531,7 @@ arc_finalize_pic (void)
   pat = gen_rtx_UNSPEC (Pmode, gen_rtvec (1, pat), ARC_UNSPEC_GOT);
   pat = gen_rtx_CONST (Pmode, pat);
 
-  pat = gen_rtx_SET (VOIDmode, baseptr_rtx, pat);
+  pat = gen_rtx_SET (baseptr_rtx, pat);
 
   emit_insn (pat);
 }
@@ -2555,7 +2567,7 @@ output_shift (rtx *operands)
 {
   /*  static int loopend_lab;*/
   rtx shift = operands[3];
-  enum machine_mode mode = GET_MODE (shift);
+  machine_mode mode = GET_MODE (shift);
   enum rtx_code code = GET_CODE (shift);
   const char *shift_one;
 
@@ -4097,9 +4109,11 @@ static void arc_file_start (void)
    scanned.  In either case, *TOTAL contains the cost result.  */
 
 static bool
-arc_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
-	       int *total, bool speed)
+arc_rtx_costs (rtx x, machine_mode mode, int outer_code,
+	       int opno ATTRIBUTE_UNUSED, int *total, bool speed)
 {
+  int code = GET_CODE (x);
+
   switch (code)
     {
       /* Small integers are as cheap as registers.  */
@@ -4191,7 +4205,8 @@ arc_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
 	  if (CONSTANT_P (XEXP (x, 0)))
 	    {
 	      *total += (COSTS_N_INSNS (2)
-			 + rtx_cost (XEXP (x, 1), (enum rtx_code) code, 0, speed));
+			 + rtx_cost (XEXP (x, 1), mode, (enum rtx_code) code,
+				     0, speed));
 	      return true;
 	    }
 	  *total = COSTS_N_INSNS (1);
@@ -4233,8 +4248,8 @@ arc_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
       if (GET_CODE (XEXP (x, 0)) == MULT
 	  && _2_4_8_operand (XEXP (XEXP (x, 0), 1), VOIDmode))
 	{
-	  *total += (rtx_cost (XEXP (x, 1), PLUS, 0, speed)
-		     + rtx_cost (XEXP (XEXP (x, 0), 0), PLUS, 1, speed));
+	  *total += (rtx_cost (XEXP (x, 1), mode, PLUS, 0, speed)
+		     + rtx_cost (XEXP (XEXP (x, 0), 0), mode, PLUS, 1, speed));
 	  return true;
 	}
       return false;
@@ -4242,8 +4257,8 @@ arc_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
       if (GET_CODE (XEXP (x, 1)) == MULT
 	  && _2_4_8_operand (XEXP (XEXP (x, 1), 1), VOIDmode))
 	{
-	  *total += (rtx_cost (XEXP (x, 0), PLUS, 0, speed)
-		     + rtx_cost (XEXP (XEXP (x, 1), 0), PLUS, 1, speed));
+	  *total += (rtx_cost (XEXP (x, 0), mode, PLUS, 0, speed)
+		     + rtx_cost (XEXP (XEXP (x, 1), 0), mode, PLUS, 1, speed));
 	  return true;
 	}
       return false;
@@ -4258,15 +4273,16 @@ arc_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
 	    /* btst / bbit0 / bbit1:
 	       Small integers and registers are free; everything else can
 	       be put in a register.  */
-	    *total = (rtx_cost (XEXP (op0, 0), SET, 1, speed)
-		      + rtx_cost (XEXP (op0, 2), SET, 1, speed));
+	    mode = GET_MODE (XEXP (op0, 0));
+	    *total = (rtx_cost (XEXP (op0, 0), mode, SET, 1, speed)
+		      + rtx_cost (XEXP (op0, 2), mode, SET, 1, speed));
 	    return true;
 	  }
 	if (GET_CODE (op0) == AND && op1 == const0_rtx
 	    && satisfies_constraint_C1p (XEXP (op0, 1)))
 	  {
 	    /* bmsk.f */
-	    *total = rtx_cost (XEXP (op0, 0), SET, 1, speed);
+	    *total = rtx_cost (XEXP (op0, 0), VOIDmode, SET, 1, speed);
 	    return true;
 	  }
 	/* add.f  */
@@ -4275,8 +4291,9 @@ arc_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
 	    /* op0 might be constant, the inside of op1 is rather
 	       unlikely to be so.  So swapping the operands might lower
 	       the cost.  */
-	    *total = (rtx_cost (op0, PLUS, 1, speed)
-		      + rtx_cost (XEXP (op1, 0), PLUS, 0, speed));
+	    mode = GET_MODE (op0);
+	    *total = (rtx_cost (op0, mode, PLUS, 1, speed)
+		      + rtx_cost (XEXP (op1, 0), mode, PLUS, 0, speed));
 	  }
 	return false;
       }
@@ -4291,18 +4308,19 @@ arc_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
 	     be put in a register.  */
 	  rtx op0 = XEXP (x, 0);
 
-	  *total = (rtx_cost (XEXP (op0, 0), SET, 1, speed)
-		    + rtx_cost (XEXP (op0, 2), SET, 1, speed));
+	  mode = GET_MODE (XEXP (op0, 0));
+	  *total = (rtx_cost (XEXP (op0, 0), mode, SET, 1, speed)
+		    + rtx_cost (XEXP (op0, 2), mode, SET, 1, speed));
 	  return true;
 	}
       /* Fall through.  */
     /* scc_insn expands into two insns.  */
     case GTU: case GEU: case LEU:
-      if (GET_MODE (x) == SImode)
+      if (mode == SImode)
 	*total += COSTS_N_INSNS (1);
       return false;
     case LTU: /* might use adc.  */
-      if (GET_MODE (x) == SImode)
+      if (mode == SImode)
 	*total += COSTS_N_INSNS (1) - 1;
       return false;
     default:
@@ -4703,7 +4721,7 @@ arc_output_pic_addr_const (FILE * file, rtx x, int code)
 /* Emit insns to move operands[1] into operands[0].  */
 
 void
-emit_pic_move (rtx *operands, enum machine_mode)
+emit_pic_move (rtx *operands, machine_mode)
 {
   rtx temp = reload_in_progress ? operands[0] : gen_reg_rtx (Pmode);
 
@@ -4745,7 +4763,7 @@ emit_pic_move (rtx *operands, enum machine_mode)
 /* Implement TARGET_ARG_PARTIAL_BYTES.  */
 
 static int
-arc_arg_partial_bytes (cumulative_args_t cum_v, enum machine_mode mode,
+arc_arg_partial_bytes (cumulative_args_t cum_v, machine_mode mode,
 		       tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -4803,7 +4821,7 @@ arc_arg_partial_bytes (cumulative_args_t cum_v, enum machine_mode mode,
    and the rest are pushed.  */
 
 static rtx
-arc_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
+arc_function_arg (cumulative_args_t cum_v, machine_mode mode,
 		  const_tree type ATTRIBUTE_UNUSED, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -4850,7 +4868,7 @@ arc_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
    course function_arg_partial_nregs will come into play.  */
 
 static void
-arc_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
+arc_function_arg_advance (cumulative_args_t cum_v, machine_mode mode,
 			  const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -4876,7 +4894,7 @@ arc_function_value (const_tree valtype,
 		    const_tree fn_decl_or_type ATTRIBUTE_UNUSED,
 		    bool outgoing ATTRIBUTE_UNUSED)
 {
-  enum machine_mode mode = TYPE_MODE (valtype);
+  machine_mode mode = TYPE_MODE (valtype);
   int unsignedp ATTRIBUTE_UNUSED;
 
   unsignedp = TYPE_UNSIGNED (valtype);
@@ -4910,7 +4928,7 @@ arc_legitimate_pic_operand_p (rtx x)
    satisfies CONSTANT_P.  */
 
 bool
-arc_legitimate_constant_p (enum machine_mode, rtx x)
+arc_legitimate_constant_p (machine_mode, rtx x)
 {
   if (!flag_pic)
     return true;
@@ -4961,7 +4979,7 @@ arc_legitimate_constant_p (enum machine_mode, rtx x)
 }
 
 static bool
-arc_legitimate_address_p (enum machine_mode mode, rtx x, bool strict)
+arc_legitimate_address_p (machine_mode mode, rtx x, bool strict)
 {
   if (RTX_OK_FOR_BASE_P (x, strict))
      return true;
@@ -5017,7 +5035,7 @@ arc_mode_dependent_address_p (const_rtx addr, addr_space_t)
 /* Determine if it's legal to put X into the constant pool.  */
 
 static bool
-arc_cannot_force_const_mem (enum machine_mode mode, rtx x)
+arc_cannot_force_const_mem (machine_mode mode, rtx x)
 {
   return !arc_legitimate_constant_p (mode, x);
 }
@@ -5106,7 +5124,7 @@ arc_init_builtins (void)
       arc_init_simd_builtins ();
 }
 
-static rtx arc_expand_simd_builtin (tree, rtx, rtx, enum machine_mode, int);
+static rtx arc_expand_simd_builtin (tree, rtx, rtx, machine_mode, int);
 
 /* Expand an expression EXP that calls a built-in function,
    with result going to TARGET if that's convenient
@@ -5118,7 +5136,7 @@ static rtx
 arc_expand_builtin (tree exp,
 		    rtx target,
 		    rtx subtarget,
-		    enum machine_mode mode,
+		    machine_mode mode,
 		    int ignore)
 {
   tree              fndecl = TREE_OPERAND (CALL_EXPR_FN (exp), 0);
@@ -5128,8 +5146,8 @@ arc_expand_builtin (tree exp,
   rtx               op1;
   int               fcode = DECL_FUNCTION_CODE (fndecl);
   int               icode;
-  enum machine_mode mode0;
-  enum machine_mode mode1;
+  machine_mode mode0;
+  machine_mode mode1;
 
   if (fcode > ARC_SIMD_BUILTIN_BEGIN && fcode < ARC_SIMD_BUILTIN_END)
     return arc_expand_simd_builtin (exp, target, subtarget, mode, ignore);
@@ -5461,7 +5479,8 @@ check_if_valid_sleep_operand (rtx *operands, int opno)
 	if( UNSIGNED_INT6 (INTVAL (operands[opno])))
 	    return true;
     default:
-	fatal_error("operand for sleep instruction must be an unsigned 6 bit compile-time constant");
+	fatal_error (input_location,
+		     "operand for sleep instruction must be an unsigned 6 bit compile-time constant");
 	break;
     }
   return false;
@@ -5696,7 +5715,7 @@ walk_stores (rtx x, void (*fun) (rtx, rtx, void *), void *data)
 
 static bool
 arc_pass_by_reference (cumulative_args_t ca_v ATTRIBUTE_UNUSED,
-		       enum machine_mode mode ATTRIBUTE_UNUSED,
+		       machine_mode mode ATTRIBUTE_UNUSED,
 		       const_tree type,
 		       bool named ATTRIBUTE_UNUSED)
 {
@@ -5907,8 +5926,7 @@ arc_reorg (void)
 	      if (next_active_insn (top_label) == insn)
 		{
 		  rtx lc_set
-		    = gen_rtx_SET (VOIDmode,
-				   XEXP (XVECEXP (PATTERN (lp), 0, 3), 0),
+		    = gen_rtx_SET (XEXP (XVECEXP (PATTERN (lp), 0, 3), 0),
 				   const0_rtx);
 
 		  rtx_insn *lc_set_insn = emit_insn_before (lc_set, insn);
@@ -6013,7 +6031,7 @@ arc_reorg (void)
       cfun->machine->ccfsm_current_insn = NULL_RTX;
 
       if (!INSN_ADDRESSES_SET_P())
-	  fatal_error ("Insn addresses not set after shorten_branches");
+	  fatal_error (input_location, "Insn addresses not set after shorten_branches");
 
       for (insn = get_insns (); insn; insn = NEXT_INSN (insn))
 	{
@@ -6172,7 +6190,7 @@ arc_reorg (void)
 
 		  brcc_insn
 		    = gen_rtx_IF_THEN_ELSE (VOIDmode, op, label, pc_rtx);
-		  brcc_insn = gen_rtx_SET (VOIDmode, pc_rtx, brcc_insn);
+		  brcc_insn = gen_rtx_SET (pc_rtx, brcc_insn);
 		  cc_clob_rtx = gen_rtx_CLOBBER (VOIDmode, cc_clob_rtx);
 		  brcc_insn
 		    = gen_rtx_PARALLEL
@@ -6217,7 +6235,7 @@ arc_reorg (void)
     } while (changed);
 
   if (INSN_ADDRESSES_SET_P())
-    fatal_error ("insn addresses not freed");
+    fatal_error (input_location, "insn addresses not freed");
 
   arc_reorg_in_progress = 0;
 }
@@ -6336,7 +6354,7 @@ arc_in_small_data_p (const_tree decl)
    as a gp+symref.  */
 
 static bool
-arc_rewrite_small_data_p (rtx x)
+arc_rewrite_small_data_p (const_rtx x)
 {
   if (GET_CODE (x) == CONST)
     x = XEXP (x, 0);
@@ -6351,38 +6369,6 @@ arc_rewrite_small_data_p (rtx x)
 	  && SYMBOL_REF_SMALL_P(x));
 }
 
-/* A for_each_rtx callback, used by arc_rewrite_small_data.  */
-
-static int
-arc_rewrite_small_data_1 (rtx *loc, void *data)
-{
-  if (arc_rewrite_small_data_p (*loc))
-    {
-      rtx top;
-
-      gcc_assert (SDATA_BASE_REGNUM == PIC_OFFSET_TABLE_REGNUM);
-      *loc = gen_rtx_PLUS (Pmode, pic_offset_table_rtx, *loc);
-      if (loc == data)
-	return -1;
-      top = *(rtx*) data;
-      if (GET_CODE (top) == MEM && &XEXP (top, 0) == loc)
-	; /* OK.  */
-      else if (GET_CODE (top) == MEM
-	  && GET_CODE (XEXP (top, 0)) == PLUS
-	  && GET_CODE (XEXP (XEXP (top, 0), 0)) == MULT)
-	*loc = force_reg (Pmode, *loc);
-      else
-	gcc_unreachable ();
-      return -1;
-    }
-
-  if (GET_CODE (*loc) == PLUS
-      && rtx_equal_p (XEXP (*loc, 0), pic_offset_table_rtx))
-    return -1;
-
-  return 0;
-}
-
 /* If possible, rewrite OP so that it refers to small data using
    explicit relocations.  */
 
@@ -6390,30 +6376,53 @@ rtx
 arc_rewrite_small_data (rtx op)
 {
   op = copy_insn (op);
-  for_each_rtx (&op, arc_rewrite_small_data_1, &op);
+  subrtx_ptr_iterator::array_type array;
+  FOR_EACH_SUBRTX_PTR (iter, array, &op, ALL)
+    {
+      rtx *loc = *iter;
+      if (arc_rewrite_small_data_p (*loc))
+	{
+	  gcc_assert (SDATA_BASE_REGNUM == PIC_OFFSET_TABLE_REGNUM);
+	  *loc = gen_rtx_PLUS (Pmode, pic_offset_table_rtx, *loc);
+	  if (loc != &op)
+	    {
+	      if (GET_CODE (op) == MEM && &XEXP (op, 0) == loc)
+		; /* OK.  */
+	      else if (GET_CODE (op) == MEM
+		       && GET_CODE (XEXP (op, 0)) == PLUS
+		       && GET_CODE (XEXP (XEXP (op, 0), 0)) == MULT)
+		*loc = force_reg (Pmode, *loc);
+	      else
+		gcc_unreachable ();
+	    }
+	  iter.skip_subrtxes ();
+	}
+      else if (GET_CODE (*loc) == PLUS
+	       && rtx_equal_p (XEXP (*loc, 0), pic_offset_table_rtx))
+	iter.skip_subrtxes ();
+    }
   return op;
-}
-
-/* A for_each_rtx callback for small_data_pattern.  */
-
-static int
-small_data_pattern_1 (rtx *loc, void *data ATTRIBUTE_UNUSED)
-{
-  if (GET_CODE (*loc) == PLUS
-      && rtx_equal_p (XEXP (*loc, 0), pic_offset_table_rtx))
-    return  -1;
-
-  return arc_rewrite_small_data_p (*loc);
 }
 
 /* Return true if OP refers to small data symbols directly, not through
    a PLUS.  */
 
 bool
-small_data_pattern (rtx op, enum machine_mode)
+small_data_pattern (rtx op, machine_mode)
 {
-  return (GET_CODE (op) != SEQUENCE
-	  && for_each_rtx (&op, small_data_pattern_1, 0));
+  if (GET_CODE (op) == SEQUENCE)
+    return false;
+  subrtx_iterator::array_type array;
+  FOR_EACH_SUBRTX (iter, array, op, ALL)
+    {
+      const_rtx x = *iter;
+      if (GET_CODE (x) == PLUS
+	  && rtx_equal_p (XEXP (x, 0), pic_offset_table_rtx))
+	iter.skip_subrtxes ();
+      else if (arc_rewrite_small_data_p (x))
+	return true;
+    }
+  return false;
 }
 
 /* Return true if OP is an acceptable memory operand for ARCompact
@@ -6424,7 +6433,7 @@ small_data_pattern (rtx op, enum machine_mode)
 /* volatile cache option still to be handled.  */
 
 bool
-compact_sda_memory_operand (rtx op, enum machine_mode mode)
+compact_sda_memory_operand (rtx op, machine_mode mode)
 {
   rtx addr;
   int size;
@@ -6828,7 +6837,7 @@ static rtx
 arc_expand_simd_builtin (tree exp,
 			 rtx target,
 			 rtx subtarget ATTRIBUTE_UNUSED,
-			 enum machine_mode mode ATTRIBUTE_UNUSED,
+			 machine_mode mode ATTRIBUTE_UNUSED,
 			 int ignore ATTRIBUTE_UNUSED)
 {
   tree              fndecl = TREE_OPERAND (CALL_EXPR_FN (exp), 0);
@@ -6845,11 +6854,11 @@ arc_expand_simd_builtin (tree exp,
   unsigned int         i;
   int               fcode = DECL_FUNCTION_CODE (fndecl);
   int               icode;
-  enum machine_mode mode0;
-  enum machine_mode mode1;
-  enum machine_mode mode2;
-  enum machine_mode mode3;
-  enum machine_mode mode4;
+  machine_mode mode0;
+  machine_mode mode1;
+  machine_mode mode2;
+  machine_mode mode3;
+  machine_mode mode4;
   const struct builtin_description * d;
 
   for (i = 0, d = arc_simd_builtin_desc_list;
@@ -7289,7 +7298,7 @@ arc_preserve_reload_p (rtx in)
 }
 
 int
-arc_register_move_cost (enum machine_mode,
+arc_register_move_cost (machine_mode,
 			enum reg_class from_class, enum reg_class to_class)
 {
   /* The ARC600 has no bypass for extension registers, hence a nop might be
@@ -7536,7 +7545,7 @@ arc_expand_movmem (rtx *operands)
   for (i = 0; size > 0; i ^= 1, size -= piece)
     {
       rtx tmp;
-      enum machine_mode mode;
+      machine_mode mode;
 
       if (piece > size)
 	piece = size & -size;
@@ -7567,7 +7576,7 @@ arc_expand_movmem (rtx *operands)
    been emitted.  */
 
 bool
-prepare_move_operands (rtx *operands, enum machine_mode mode)
+prepare_move_operands (rtx *operands, machine_mode mode)
 {
   /* We used to do this only for MODE_INT Modes, but addresses to floating
      point variables may well be in the small data section.  */
@@ -7591,7 +7600,7 @@ prepare_move_operands (rtx *operands, enum machine_mode mode)
 	     variables.  */
 	  operands[1] = arc_rewrite_small_data (operands[1]);
 
-	  emit_insn (gen_rtx_SET (mode, operands[0],operands[1]));
+	  emit_insn (gen_rtx_SET (operands[0],operands[1]));
 	  /* ??? This note is useless, since it only restates the set itself.
 	     We should rather use the original SYMBOL_REF.  However, there is
 	     the problem that we are lying to the compiler about these
@@ -7655,7 +7664,7 @@ prepare_move_operands (rtx *operands, enum machine_mode mode)
 
 bool
 prepare_extend_operands (rtx *operands, enum rtx_code code,
-			 enum machine_mode omode)
+			 machine_mode omode)
 {
   if (!TARGET_NO_SDATA_SET && small_data_pattern (operands[1], Pmode))
     {
@@ -7663,7 +7672,7 @@ prepare_extend_operands (rtx *operands, enum rtx_code code,
 	 variables.  */
       operands[1]
 	= gen_rtx_fmt_e (code, omode, arc_rewrite_small_data (operands[1]));
-      emit_insn (gen_rtx_SET (omode, operands[0], operands[1]));
+      emit_insn (gen_rtx_SET (operands[0], operands[1]));
       set_unique_reg_note (get_last_insn (), REG_EQUAL, operands[1]);
 
       /* Take care of the REG_EQUAL note that will be attached to mark the
@@ -7706,38 +7715,6 @@ disi_highpart (rtx in)
   return simplify_gen_subreg (SImode, in, DImode, TARGET_BIG_ENDIAN ? 0 : 4);
 }
 
-/* Called by arc600_corereg_hazard via for_each_rtx.
-   If a hazard is found, return a conservative estimate of the required
-   length adjustment to accomodate a nop.  */
-
-static int
-arc600_corereg_hazard_1 (rtx *xp, void *data)
-{
-  rtx x = *xp;
-  rtx dest;
-  rtx pat = (rtx) data;
-
-  switch (GET_CODE (x))
-    {
-    case SET: case POST_INC: case POST_DEC: case PRE_INC: case PRE_DEC:
-      break;
-    default:
-    /* This is also fine for PRE/POST_MODIFY, because they contain a SET.  */
-      return 0;
-    }
-  dest = XEXP (x, 0);
-  /* Check if this sets a an extension register.  N.B. we use 61 for the
-     condition codes, which is definitely not an extension register.  */
-  if (REG_P (dest) && REGNO (dest) >= 32 && REGNO (dest) < 61
-      /* Check if the same register is used by the PAT.  */
-      && (refers_to_regno_p
-	   (REGNO (dest),
-	   REGNO (dest) + (GET_MODE_SIZE (GET_MODE (dest)) + 3) / 4U, pat, 0)))
-    return 4;
-
-  return 0;
-}
-
 /* Return length adjustment for INSN.
    For ARC600:
    A write to a core reg greater or equal to 32 must not be immediately
@@ -7769,8 +7746,31 @@ arc600_corereg_hazard (rtx_insn *pred, rtx_insn *succ)
       || recog_memoized (pred) == CODE_FOR_umul64_600
       || recog_memoized (pred) == CODE_FOR_umac64_600)
     return 0;
-  return for_each_rtx (&PATTERN (pred), arc600_corereg_hazard_1,
-		       PATTERN (succ));
+  subrtx_iterator::array_type array;
+  FOR_EACH_SUBRTX (iter, array, PATTERN (pred), NONCONST)
+    {
+      const_rtx x = *iter;
+      switch (GET_CODE (x))
+	{
+	case SET: case POST_INC: case POST_DEC: case PRE_INC: case PRE_DEC:
+	  break;
+	default:
+	  /* This is also fine for PRE/POST_MODIFY, because they
+	     contain a SET.  */
+	  continue;
+	}
+      rtx dest = XEXP (x, 0);
+      /* Check if this sets a an extension register.  N.B. we use 61 for the
+	 condition codes, which is definitely not an extension register.  */
+      if (REG_P (dest) && REGNO (dest) >= 32 && REGNO (dest) < 61
+	  /* Check if the same register is used by the PAT.  */
+	  && (refers_to_regno_p
+	      (REGNO (dest),
+	       REGNO (dest) + (GET_MODE_SIZE (GET_MODE (dest)) + 3) / 4U,
+	       PATTERN (succ), 0)))
+	return 4;
+    }
+  return 0;
 }
 
 /* For ARC600:
@@ -8178,7 +8178,7 @@ arc_get_ccfsm_cond (struct arc_ccfsm *statep, bool reverse)
 
   gcc_assert (ARC_INVERSE_CONDITION_CODE (raw_cc) == statep->cc);
 
-  enum machine_mode ccm = GET_MODE (XEXP (cond, 0));
+  machine_mode ccm = GET_MODE (XEXP (cond, 0));
   enum rtx_code code = reverse_condition (GET_CODE (cond));
   if (code == UNKNOWN || ccm == CC_FP_GTmode || ccm == CC_FP_GEmode)
     code = reverse_condition_maybe_unordered (GET_CODE (cond));
@@ -8209,7 +8209,7 @@ conditionalize_nonjump (rtx pat, rtx cond, rtx insn, bool annulled)
 	      /* Leave add_n alone - the canonical form is to
 		 have the complex summand first.  */
 	      && REG_P (src0))
-	    pat = gen_rtx_SET (VOIDmode, dst,
+	    pat = gen_rtx_SET (dst,
 			       gen_rtx_fmt_ee (GET_CODE (src), GET_MODE (src),
 					       src1, src0));
 	}
@@ -8351,7 +8351,7 @@ arc_ifcvt (void)
 	  else if (JUMP_P (insn) && ANY_RETURN_P (PATTERN (insn)))
 	    {
 	      pat = gen_rtx_IF_THEN_ELSE (VOIDmode, cond, pat, pc_rtx);
-	      pat = gen_rtx_SET (VOIDmode, pc_rtx, pat);
+	      pat = gen_rtx_SET (pc_rtx, pat);
 	    }
 	  else
 	    gcc_unreachable ();
@@ -8411,7 +8411,7 @@ arc_predicate_delay_insns (void)
 	gcc_unreachable ();
       if (reverse != !INSN_FROM_TARGET_P (dlay))
 	{
-	  enum machine_mode ccm = GET_MODE (XEXP (cond, 0));
+	  machine_mode ccm = GET_MODE (XEXP (cond, 0));
 	  enum rtx_code code = reverse_condition (GET_CODE (cond));
 	  if (code == UNKNOWN || ccm == CC_FP_GTmode || ccm == CC_FP_GEmode)
 	    code = reverse_condition_maybe_unordered (GET_CODE (cond));
@@ -8440,34 +8440,30 @@ arc_predicate_delay_insns (void)
   be hoisted out into a delay slot, a basic block can also be emptied this
   way, and branch and/or fall through targets be redirected.  Hence we don't
   want such writes in a delay slot.  */
-/* Called by arc_write_ext_corereg via for_each_rtx.  */
-
-static int
-write_ext_corereg_1 (rtx *xp, void *data ATTRIBUTE_UNUSED)
-{
-  rtx x = *xp;
-  rtx dest;
-
-  switch (GET_CODE (x))
-    {
-    case SET: case POST_INC: case POST_DEC: case PRE_INC: case PRE_DEC:
-      break;
-    default:
-    /* This is also fine for PRE/POST_MODIFY, because they contain a SET.  */
-      return 0;
-    }
-  dest = XEXP (x, 0);
-  if (REG_P (dest) && REGNO (dest) >= 32 && REGNO (dest) < 61)
-    return 1;
-  return 0;
-}
 
 /* Return nonzreo iff INSN writes to an extension core register.  */
 
 int
 arc_write_ext_corereg (rtx insn)
 {
-  return for_each_rtx (&PATTERN (insn), write_ext_corereg_1, 0);
+  subrtx_iterator::array_type array;
+  FOR_EACH_SUBRTX (iter, array, PATTERN (insn), NONCONST)
+    {
+      const_rtx x = *iter;
+      switch (GET_CODE (x))
+	{
+	case SET: case POST_INC: case POST_DEC: case PRE_INC: case PRE_DEC:
+	  break;
+	default:
+	  /* This is also fine for PRE/POST_MODIFY, because they
+	     contain a SET.  */
+	  continue;
+	}
+      const_rtx dest = XEXP (x, 0);
+      if (REG_P (dest) && REGNO (dest) >= 32 && REGNO (dest) < 61)
+	return 1;
+    }
+  return 0;
 }
 
 /* This is like the hook, but returns NULL when it can't / won't generate
@@ -8475,7 +8471,7 @@ arc_write_ext_corereg (rtx insn)
 
 static rtx
 arc_legitimize_address_0 (rtx x, rtx oldx ATTRIBUTE_UNUSED,
-			  enum machine_mode mode)
+			  machine_mode mode)
 {
   rtx addr, inner;
 
@@ -8506,13 +8502,13 @@ arc_legitimize_address_0 (rtx x, rtx oldx ATTRIBUTE_UNUSED,
     }
   else if (GET_CODE (addr) == SYMBOL_REF && !SYMBOL_REF_FUNCTION_P (addr))
     x = force_reg (Pmode, x);
-  if (memory_address_p ((enum machine_mode) mode, x))
+  if (memory_address_p ((machine_mode) mode, x))
      return x;
   return NULL_RTX;
 }
 
 static rtx
-arc_legitimize_address (rtx orig_x, rtx oldx, enum machine_mode mode)
+arc_legitimize_address (rtx orig_x, rtx oldx, machine_mode mode)
 {
   rtx new_x = arc_legitimize_address_0 (orig_x, oldx, mode);
 
@@ -8918,7 +8914,7 @@ arc_process_double_reg_moves (rtx *operands)
       if (TARGET_DPFP_DISABLE_LRSR)
 	{
 	  /* gen *movdf_insn_nolrsr */
-	  rtx set = gen_rtx_SET (VOIDmode, dest, src);
+	  rtx set = gen_rtx_SET (dest, src);
 	  rtx use1 = gen_rtx_USE (VOIDmode, const1_rtx);
 	  emit_insn (gen_rtx_PARALLEL (VOIDmode, gen_rtvec (2, set, use1)));
 	}
@@ -8930,12 +8926,10 @@ arc_process_double_reg_moves (rtx *operands)
 	  rtx destLow  = simplify_gen_subreg(SImode, dest, DFmode, 0);
 
 	  /* Produce the two LR insns to get the high and low parts.  */
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  destHigh,
+	  emit_insn (gen_rtx_SET (destHigh,
 				  gen_rtx_UNSPEC_VOLATILE (Pmode, gen_rtvec (1, src),
 				  VUNSPEC_LR_HIGH)));
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  destLow,
+	  emit_insn (gen_rtx_SET (destLow,
 				  gen_rtx_UNSPEC_VOLATILE (Pmode, gen_rtvec (1, src),
 				  VUNSPEC_LR)));
 	}
@@ -8966,7 +8960,7 @@ arc_process_double_reg_moves (rtx *operands)
 rtx
 arc_split_move (rtx *operands)
 {
-  enum machine_mode mode = GET_MODE (operands[0]);
+  machine_mode mode = GET_MODE (operands[0]);
   int i;
   int swap = 0;
   rtx xop[4];
@@ -9032,8 +9026,8 @@ arc_split_move (rtx *operands)
   operands[5-swap] = xop[3];
 
   start_sequence ();
-  emit_insn (gen_rtx_SET (VOIDmode, operands[2], operands[3]));
-  emit_insn (gen_rtx_SET (VOIDmode, operands[4], operands[5]));
+  emit_insn (gen_rtx_SET (operands[2], operands[3]));
+  emit_insn (gen_rtx_SET (operands[4], operands[5]));
   val = get_insns ();
   end_sequence ();
 
@@ -9062,7 +9056,7 @@ arc_regno_use_in (unsigned int regno, rtx x)
   int i, j;
   rtx tem;
 
-  if (REG_P (x) && refers_to_regno_p (regno, regno+1, x, (rtx *) 0))
+  if (REG_P (x) && refers_to_regno_p (regno, x))
     return x;
 
   fmt = GET_RTX_FORMAT (GET_CODE (x));
@@ -9301,13 +9295,13 @@ arc_register_priority (int r)
 }
 
 static reg_class_t
-arc_spill_class (reg_class_t /* orig_class */, enum machine_mode)
+arc_spill_class (reg_class_t /* orig_class */, machine_mode)
 {
   return GENERAL_REGS;
 }
 
 bool
-arc_legitimize_reload_address (rtx *p, enum machine_mode mode, int opnum,
+arc_legitimize_reload_address (rtx *p, machine_mode mode, int opnum,
 			       int itype)
 {
   rtx x = *p;
@@ -9372,6 +9366,21 @@ arc_legitimize_reload_address (rtx *p, enum machine_mode mode, int opnum,
       return true;
     }
   return false;
+}
+
+/* Implement TARGET_USE_BY_PIECES_INFRASTRUCTURE_P.  */
+
+static bool
+arc_use_by_pieces_infrastructure_p (unsigned HOST_WIDE_INT size,
+				    unsigned int align,
+				    enum by_pieces_operation op,
+				    bool speed_p)
+{
+  /* Let the movmem expander handle small block moves.  */
+  if (op == MOVE_BY_PIECES)
+    return false;
+
+  return default_use_by_pieces_infrastructure_p (size, align, op, speed_p);
 }
 
 struct gcc_target targetm = TARGET_INITIALIZER;

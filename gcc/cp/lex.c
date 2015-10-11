@@ -1,5 +1,5 @@
 /* Separate lexical analyzer for GNU C++.
-   Copyright (C) 1987-2014 Free Software Foundation, Inc.
+   Copyright (C) 1987-2015 Free Software Foundation, Inc.
    Hacked by Michael Tiemann (tiemann@cygnus.com)
 
 This file is part of GCC.
@@ -25,7 +25,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
-#include "input.h"
+#include "alias.h"
 #include "tree.h"
 #include "stringpool.h"
 #include "cp-tree.h"
@@ -173,7 +173,9 @@ init_reswords (void)
   int mask = 0;
 
   if (cxx_dialect < cxx11)
-    mask |= D_CXX0X;
+    mask |= D_CXX11;
+  if (!flag_concepts)
+    mask |= D_CXX_CONCEPTS;
   if (flag_no_asm)
     mask |= D_ASM | D_EXT;
   if (flag_no_gnu_keywords)
@@ -250,7 +252,6 @@ cxx_init (void)
   init_cp_semantics ();
   init_operators ();
   init_method ();
-  init_error ();
 
   current_function_decl = NULL;
 
@@ -552,6 +553,9 @@ retrofit_lang_decl (tree t)
   struct lang_decl *ld;
   size_t size;
   int sel;
+
+  if (DECL_LANG_SPECIFIC (t))
+    return;
 
   if (TREE_CODE (t) == FUNCTION_DECL)
     sel = 1, size = sizeof (struct lang_decl_fn);

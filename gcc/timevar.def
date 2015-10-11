@@ -1,6 +1,6 @@
 /* This file contains the definitions for timing variables used to
    measure run-time performance of the compiler.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
    Contributed by Alex Samuel <samuel@codesourcery.com>
 
    This file is part of GCC.
@@ -31,11 +31,17 @@
 
 /* The total execution time.  */
 DEFTIMEVAR (TV_TOTAL                 , "total time")
-/* The compiler phases.  These must be mutually exclusive.
-   Ideally, they would sum to near the total time.  */
+/* The compiler phases.
+
+   These must be mutually exclusive, and the NAME field must begin
+   with "phase".
+
+   Also, their sum must be within a millionth of the total time (see
+   validate_phases).  */
 DEFTIMEVAR (TV_PHASE_SETUP           , "phase setup")
 DEFTIMEVAR (TV_PHASE_PARSING         , "phase parsing")
 DEFTIMEVAR (TV_PHASE_DEFERRED        , "phase lang. deferred")
+DEFTIMEVAR (TV_PHASE_LATE_PARSING_CLEANUPS, "phase late parsing cleanups")
 DEFTIMEVAR (TV_PHASE_OPT_GEN         , "phase opt and generate")
 DEFTIMEVAR (TV_PHASE_DBGINFO         , "phase debug info")
 DEFTIMEVAR (TV_PHASE_CHECK_DBGINFO   , "phase check & debug info")
@@ -237,6 +243,7 @@ DEFTIMEVAR (TV_LRA_INHERITANCE	     , "LRA reload inheritance")
 DEFTIMEVAR (TV_LRA_CREATE_LIVE_RANGES, "LRA create live ranges")
 DEFTIMEVAR (TV_LRA_ASSIGN	     , "LRA hard reg assignment")
 DEFTIMEVAR (TV_LRA_COALESCE	     , "LRA coalesce pseudo regs")
+DEFTIMEVAR (TV_LRA_REMAT	     , "LRA rematerialization")
 DEFTIMEVAR (TV_RELOAD		     , "reload")
 DEFTIMEVAR (TV_RELOAD_CSE_REGS       , "reload CSE regs")
 DEFTIMEVAR (TV_GCSE_AFTER_RELOAD     , "load CSE after reload")
@@ -246,6 +253,7 @@ DEFTIMEVAR (TV_IFCVT2		     , "if-conversion 2")
 DEFTIMEVAR (TV_COMBINE_STACK_ADJUST  , "combine stack adjustments")
 DEFTIMEVAR (TV_PEEPHOLE2             , "peephole 2")
 DEFTIMEVAR (TV_RENAME_REGISTERS      , "rename registers")
+DEFTIMEVAR (TV_SCHED_FUSION          , "scheduling fusion")
 DEFTIMEVAR (TV_CPROP_REGISTERS       , "hard reg cprop")
 DEFTIMEVAR (TV_SCHED2                , "scheduling 2")
 DEFTIMEVAR (TV_MACH_DEP              , "machine dep reorg")
@@ -266,12 +274,15 @@ DEFTIMEVAR (TV_PLUGIN_RUN            , "plugin execution")
 DEFTIMEVAR (TV_GIMPLE_SLSR           , "straight-line strength reduction")
 DEFTIMEVAR (TV_VTABLE_VERIFICATION   , "vtable verification")
 DEFTIMEVAR (TV_TREE_UBSAN            , "tree ubsan")
+DEFTIMEVAR (TV_INITIALIZE_RTL        , "initialize rtl")
+DEFTIMEVAR (TV_GIMPLE_LADDRESS       , "address lowering")
 
 /* Everything else in rest_of_compilation not included above.  */
 DEFTIMEVAR (TV_EARLY_LOCAL	     , "early local passes")
 DEFTIMEVAR (TV_OPTIMIZE		     , "unaccounted optimizations")
 DEFTIMEVAR (TV_REST_OF_COMPILATION   , "rest of compilation")
 DEFTIMEVAR (TV_POSTRELOAD	     , "unaccounted post reload")
+DEFTIMEVAR (TV_LATE_COMPILATION	     , "unaccounted late compilation")
 DEFTIMEVAR (TV_REMOVE_UNUSED	     , "remove unused locals")
 DEFTIMEVAR (TV_ADDRESS_TAKEN	     , "address taken")
 DEFTIMEVAR (TV_TODO		     , "unaccounted todo")
@@ -279,3 +290,11 @@ DEFTIMEVAR (TV_VERIFY_LOOP_CLOSED    , "verify loop closed")
 DEFTIMEVAR (TV_VERIFY_RTL_SHARING    , "verify RTL sharing")
 DEFTIMEVAR (TV_REBUILD_FREQUENCIES   , "rebuild frequencies")
 DEFTIMEVAR (TV_REPAIR_LOOPS	     , "repair loop structures")
+
+/* Stuff used by libgccjit.so.  */
+DEFTIMEVAR (TV_JIT_REPLAY	     , "replay of JIT client activity")
+DEFTIMEVAR (TV_ASSEMBLE	     , "assemble JIT code")
+DEFTIMEVAR (TV_LINK		     , "link JIT code")
+DEFTIMEVAR (TV_LOAD		     , "load JIT result")
+DEFTIMEVAR (TV_JIT_ACQUIRING_MUTEX   , "acquiring JIT mutex")
+DEFTIMEVAR (TV_JIT_CLIENT_CODE   , "JIT client code")

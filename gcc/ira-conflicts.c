@@ -1,5 +1,5 @@
 /* IRA conflict builder.
-   Copyright (C) 2006-2014 Free Software Foundation, Inc.
+   Copyright (C) 2006-2015 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -21,20 +21,21 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "regs.h"
+#include "backend.h"
+#include "predict.h"
 #include "rtl.h"
+#include "df.h"
+#include "regs.h"
 #include "tm_p.h"
 #include "target.h"
 #include "flags.h"
-#include "hard-reg-set.h"
-#include "basic-block.h"
 #include "insn-config.h"
-#include "recog.h"
 #include "diagnostic-core.h"
 #include "params.h"
-#include "df.h"
 #include "sparseset.h"
+#include "cfgloop.h"
+#include "ira.h"
+#include "alloc-pool.h"
 #include "ira-int.h"
 #include "addresses.h"
 
@@ -170,7 +171,6 @@ build_conflict_bit_table (void)
 	  gcc_assert (id < ira_objects_num);
 
 	  aclass = ALLOCNO_CLASS (allocno);
-	  sparseset_set_bit (objects_live, id);
 	  EXECUTE_IF_SET_IN_SPARSESET (objects_live, j)
 	    {
 	      ira_object_t live_obj = ira_object_id_map[j];
@@ -184,6 +184,7 @@ build_conflict_bit_table (void)
 		  record_object_conflict (obj, live_obj);
 		}
 	    }
+	  sparseset_set_bit (objects_live, id);
 	}
 
       for (r = ira_finish_point_ranges[i]; r != NULL; r = r->finish_next)
@@ -250,7 +251,7 @@ process_regs_for_copy (rtx reg1, rtx reg2, bool constraint_p,
   bool only_regs_p;
   ira_allocno_t a;
   reg_class_t rclass, aclass;
-  enum machine_mode mode;
+  machine_mode mode;
   ira_copy_t cp;
 
   gcc_assert (REG_SUBREG_P (reg1) && REG_SUBREG_P (reg2));
@@ -776,8 +777,8 @@ ira_build_conflicts (void)
 
 	  /* Now we deal with paradoxical subreg cases where certain registers
 	     cannot be accessed in the widest mode.  */
-	  enum machine_mode outer_mode = ALLOCNO_WMODE (a);
-	  enum machine_mode inner_mode = ALLOCNO_MODE (a);
+	  machine_mode outer_mode = ALLOCNO_WMODE (a);
+	  machine_mode inner_mode = ALLOCNO_MODE (a);
 	  if (GET_MODE_SIZE (outer_mode) > GET_MODE_SIZE (inner_mode))
 	    {
 	      enum reg_class aclass = ALLOCNO_CLASS (a);

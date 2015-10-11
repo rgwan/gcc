@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2014, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2015, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -521,6 +521,35 @@ package Sinfo is
    --      simply ignore these nodes, since they are not relevant to the task
    --      of back annotating representation information.
 
+   --  Some other ASIS-specific issues are covered in specific comments in
+   --  sections for particular nodes or flags.
+
+   ----------------
+   -- Ghost Mode --
+   ----------------
+
+   --  When a declaration is subject to pragma Ghost, it establishes a Ghost
+   --  region depending on the Ghost assertion policy in effect at the point
+   --  of declaration. This region is temporal and starts right before the
+   --  analysis of the Ghost declaration and ends after its expansion. The
+   --  values of global variable Opt.Ghost_Mode are as follows:
+
+   --    1. Check - All static semantics as defined in SPARK RM 6.9 are in
+   --       effect.
+
+   --    2. Ignore - Same as Check, ignored Ghost code is not present in ALI
+   --       files, object files as well as the final executable.
+
+   --  To achieve the runtime semantics of "Ignore", the compiler marks each
+   --  node created during an ignored Ghost region and signals all enclosing
+   --  scopes that such a node resides within. The compilation unit where the
+   --  node resides is also added to an auxiliary table for post processing.
+
+   --  After the analysis and expansion of all compilation units takes place
+   --  as well as the instantiation of all inlined [generic] bodies, the GNAT
+   --  driver initiates a separate pass which removes all ignored Ghost code
+   --  from all units stored in the auxiliary table.
+
    --------------------
    -- GNATprove Mode --
    --------------------
@@ -562,7 +591,7 @@ package Sinfo is
    --  not make sense from a user point-of-view, and that cross-references that
    --  do not lead to data dependences for subprograms can be safely ignored.
 
-   --  GNATprove relies on the following frontend behaviors:
+   --  GNATprove relies on the following front end behaviors:
 
    --    1. The first declarations in the list of visible declarations of
    --       a package declaration for a generic instance, up to the first
@@ -579,7 +608,28 @@ package Sinfo is
 
    --    4. Unconstrained types are not replaced by constrained types whose
    --       bounds are generated from an expression: Expand_Subtype_From_Expr
-   --       should be noop.
+   --       should be a no-op.
+
+   --    5. Errors (instead of warnings) are issued on compile-time-known
+   --       constraint errors even though such cases do not correspond to
+   --       illegalities in the Ada RM (this is simply another case where
+   --       GNATprove implements a subset of the full language).
+   --
+   --       However, there are a few exceptions to this rule for cases where
+   --       we want to allow the GNATprove analysis to proceed (e.g. range
+   --       checks on empty ranges, which typically appear in deactivated
+   --       code in a particular configuration).
+
+   --    6. Subtypes should match in the AST, even after a generic is
+   --       instantiated. In particular, GNATprove relies on the fact that,
+   --       on a selected component, the type of the selected component is
+   --       the type of the corresponding component in the prefix of the
+   --       selected component.
+   --
+   --       Note that, in some cases, we know that this rule is broken by the
+   --       frontend. In particular, if the selected component is a packed
+   --       array depending on a discriminant of a unconstrained formal object
+   --       parameter of a generic.
 
    -----------------------
    -- Check Flag Fields --
@@ -736,9 +786,8 @@ package Sinfo is
 
    --  Acts_As_Spec (Flag4-Sem)
    --    A flag set in the N_Subprogram_Body node for a subprogram body which
-   --    is acting as its own spec, except in the case of a library level
-   --    subprogram, in which case the flag is set on the parent compilation
-   --    unit node instead.
+   --    is acting as its own spec. In the case of a library-level subprogram
+   --    the flag is set as well on the parent compilation unit node.
 
    --  Actual_Designated_Subtype (Node4-Sem)
    --    Present in N_Free_Statement and N_Explicit_Dereference nodes. If gigi
@@ -780,7 +829,9 @@ package Sinfo is
    --    setting tag values, etc. N_Object_Declaration nodes also have this
    --    flag defined. Here it is used to indicate that an initialization
    --    expression is valid, even where it would normally not be allowed
-   --    (e.g. where the type involved is limited).
+   --    (e.g. where the type involved is limited). It is also used to stop
+   --    a Force_Evaluation call for an unchecked conversion, but this usage
+   --    is unclear and not documented ???
 
    --  Associated_Node (Node4-Sem)
    --    Present in nodes that can denote an entity: identifiers, character
@@ -1511,16 +1562,16 @@ package Sinfo is
    --    operand is of the component type of the result. Used in resolving
    --    concatenation nodes in instances.
 
+   --  Is_Controlling_Actual (Flag16-Sem)
+   --    This flag is set on in an expression that is a controlling argument in
+   --    a dispatching call. It is off in all other cases. See Sem_Disp for
+   --    details of its use.
+
    --  Is_Delayed_Aspect (Flag14-Sem)
    --    Present in N_Pragma and N_Attribute_Definition_Clause nodes which
    --    come from aspect specifications, where the evaluation of the aspect
    --    must be delayed to the freeze point. This flag is also set True in
    --    the corresponding N_Aspect_Specification node.
-
-   --  Is_Controlling_Actual (Flag16-Sem)
-   --    This flag is set on in an expression that is a controlling argument in
-   --    a dispatching call. It is off in all other cases. See Sem_Disp for
-   --    details of its use.
 
    --  Is_Disabled (Flag15-Sem)
    --    A flag set in an N_Aspect_Specification or N_Pragma node if there was
@@ -1552,6 +1603,34 @@ package Sinfo is
    --    objects. The wrapper prevents interference between exception handlers
    --    and At_End handlers.
 
+   --  Is_Generic_Contract_Pragma (Flag2-Sem)
+   --    This flag is present in N_Pragma nodes. It is set when the pragma is
+   --    a source construct, applies to a generic unit or its body and denotes
+   --    one of the following contract-related annotations:
+   --      Abstract_State
+   --      Contract_Cases
+   --      Depends
+   --      Extensions_Visible
+   --      Global
+   --      Initial_Condition
+   --      Initializes
+   --      Post
+   --      Post_Class
+   --      Postcondition
+   --      Pre
+   --      Pre_Class
+   --      Precondition
+   --      Refined_Depends
+   --      Refined_Global
+   --      Refined_Post
+   --      Refined_State
+   --      Test_Case
+
+   --  Is_Ghost_Pragma (Flag3-Sem)
+   --    This flag is present in N_Pragma nodes. It is set when the pragma is
+   --    either declared within a Ghost construct or it applies to a Ghost
+   --    construct.
+
    --  Is_Ignored (Flag9-Sem)
    --    A flag set in an N_Aspect_Specification or N_Pragma node if there was
    --    a Check_Policy or Assertion_Policy (or in the case of a Debug_Pragma)
@@ -1572,6 +1651,10 @@ package Sinfo is
    --    significance is that optimizations based on assuming that the
    --    discriminant check has a correct value cannot be performed in this
    --    case (or the discriminant check may be optimized away).
+
+   --  Is_Inherited (Flag4-Sem)
+   --    This flag is set in an N_Pragma node that appears in a N_Contract node
+   --    to indicate that the pragma has been inherited from a parent context.
 
    --  Is_Machine_Number (Flag11-Sem)
    --    This flag is set in an N_Real_Literal node to indicate that the value
@@ -2384,11 +2467,14 @@ package Sinfo is
       --  Next_Rep_Item (Node5-Sem)
       --  Class_Present (Flag6) set if from Aspect with 'Class
       --  From_Aspect_Specification (Flag13-Sem)
+      --  Import_Interface_Present (Flag16-Sem)
+      --  Is_Checked (Flag11-Sem)
       --  Is_Delayed_Aspect (Flag14-Sem)
       --  Is_Disabled (Flag15-Sem)
+      --  Is_Generic_Contract_Pragma (Flag2-Sem)
+      --  Is_Ghost_Pragma (Flag3-Sem);
       --  Is_Ignored (Flag9-Sem)
-      --  Is_Checked (Flag11-Sem)
-      --  Import_Interface_Present (Flag16-Sem)
+      --  Is_Inherited (Flag4-Sem)
       --  Split_PPC (Flag17) set if corresponding aspect had Split_PPC set
       --  Uneval_Old_Accept (Flag7-Sem)
       --  Uneval_Old_Warn (Flag18-Sem)
@@ -6306,6 +6392,13 @@ package Sinfo is
       --  Similarly, Private_Present is used to support the implementation of
       --  Ada 2005 (AI-50262).
 
+      --  Note: if the WITH clause refers to a standard library unit, then a
+      --  limited with clause is changed into a normal with clause, because we
+      --  are not prepared to deal with limited with in the context of Rtsfind.
+      --  So in this case, the Limited_Present flag will be False in the final
+      --  tree. However, we do NOT do this transformation in ASIS mode, so for
+      --  ASIS the flag will remain set in this situation.
+
       ----------------------
       -- With_Type clause --
       ----------------------
@@ -6480,6 +6573,14 @@ package Sinfo is
       --  expanded tree. This is for example used to deal with the case of
       --  a cleanup procedure that must handle declarations as well as the
       --  statements of a block.
+
+      --  Note: the cleanup_procedure_call does not go through the common
+      --  processing for calls, which in particular means that it will not be
+      --  automatically inlined in all cases, even though the procedure to be
+      --  called is marked inline. More specifically, if the procedure comes
+      --  from another unit than the main source unit, for example a run-time
+      --  unit, then it needs to be manually added to the list of bodies to be
+      --  inlined by invoking Add_Inlined_Body on it.
 
       --  N_Handled_Sequence_Of_Statements
       --  Sloc points to first token of first statement
@@ -7456,9 +7557,9 @@ package Sinfo is
 
       --  N_Contract
       --  Sloc points to the subprogram's name
-      --  Pre_Post_Conditions (Node1) (set to Empty if none)
-      --  Contract_Test_Cases (Node2) (set to Empty if none)
-      --  Classifications (Node3) (set to Empty if none)
+      --  Pre_Post_Conditions (Node1-Sem) (set to Empty if none)
+      --  Contract_Test_Cases (Node2-Sem) (set to Empty if none)
+      --  Classifications (Node3-Sem) (set to Empty if none)
 
       --  Pre_Post_Conditions contains a collection of pragmas that correspond
       --  to pre- and postconditions associated with an entry or a subprogram
@@ -8634,7 +8735,7 @@ package Sinfo is
 
    subtype N_Unit_Body is Node_Kind range
      N_Package_Body ..
-       N_Subprogram_Body;
+     N_Subprogram_Body;
 
    ---------------------------
    -- Node Access Functions --
@@ -9223,11 +9324,20 @@ package Sinfo is
    function Is_Folded_In_Parser
      (N : Node_Id) return Boolean;    -- Flag4
 
+   function Is_Generic_Contract_Pragma
+     (N : Node_Id) return Boolean;    -- Flag2
+
+   function Is_Ghost_Pragma
+     (N : Node_Id) return Boolean;    -- Flag3
+
    function Is_Ignored
      (N : Node_Id) return Boolean;    -- Flag9
 
    function Is_In_Discriminant_Check
      (N : Node_Id) return Boolean;    -- Flag11
+
+   function Is_Inherited
+     (N : Node_Id) return Boolean;    -- Flag4
 
    function Is_Machine_Number
      (N : Node_Id) return Boolean;    -- Flag11
@@ -10222,9 +10332,6 @@ package Sinfo is
    procedure Set_Is_Disabled
      (N : Node_Id; Val : Boolean := True);    -- Flag15
 
-   procedure Set_Is_Ignored
-     (N : Node_Id; Val : Boolean := True);    -- Flag9
-
    procedure Set_Is_Dynamic_Coextension
      (N : Node_Id; Val : Boolean := True);    -- Flag18
 
@@ -10243,8 +10350,20 @@ package Sinfo is
    procedure Set_Is_Folded_In_Parser
      (N : Node_Id; Val : Boolean := True);    -- Flag4
 
+   procedure Set_Is_Generic_Contract_Pragma
+     (N : Node_Id; Val : Boolean := True);    -- Flag2
+
+   procedure Set_Is_Ghost_Pragma
+     (N : Node_Id; Val : Boolean := True);    -- Flag3
+
+   procedure Set_Is_Ignored
+     (N : Node_Id; Val : Boolean := True);    -- Flag9
+
    procedure Set_Is_In_Discriminant_Check
      (N : Node_Id; Val : Boolean := True);    -- Flag11
+
+   procedure Set_Is_Inherited
+     (N : Node_Id; Val : Boolean := True);    -- Flag4
 
    procedure Set_Is_Machine_Number
      (N : Node_Id; Val : Boolean := True);    -- Flag11
@@ -10845,7 +10964,7 @@ package Sinfo is
      N_Pragma =>
        (1 => False,   --  Next_Pragma (Node1-Sem)
         2 => True,    --  Pragma_Argument_Associations (List2)
-        3 => False,   --  unused
+        3 => False,   --  Corresponding_Aspect (Node3-Sem)
         4 => True,    --  Pragma_Identifier (Node4)
         5 => False),  --  Next_Rep_Item (Node5-Sem)
 
@@ -12229,9 +12348,9 @@ package Sinfo is
         5 => False),  --  unused
 
      N_Contract =>
-       (1 => False,   --  Pre_Post_Conditions (Node1)
-        2 => False,   --  Contract_Test_Cases (Node2)
-        3 => False,   --  Classifications (Node3)
+       (1 => False,   --  Pre_Post_Conditions (Node1-Sem)
+        2 => False,   --  Contract_Test_Cases (Node2-Sem)
+        3 => False,   --  Classifications (Node3-Sem)
         4 => False,   --  unused
         5 => False),  --  unused
 
@@ -12627,8 +12746,11 @@ package Sinfo is
    pragma Inline (Is_Expanded_Build_In_Place_Call);
    pragma Inline (Is_Finalization_Wrapper);
    pragma Inline (Is_Folded_In_Parser);
+   pragma Inline (Is_Generic_Contract_Pragma);
+   pragma Inline (Is_Ghost_Pragma);
    pragma Inline (Is_Ignored);
    pragma Inline (Is_In_Discriminant_Check);
+   pragma Inline (Is_Inherited);
    pragma Inline (Is_Machine_Number);
    pragma Inline (Is_Null_Loop);
    pragma Inline (Is_Overloaded);
@@ -12961,8 +13083,11 @@ package Sinfo is
    pragma Inline (Set_Is_Expanded_Build_In_Place_Call);
    pragma Inline (Set_Is_Finalization_Wrapper);
    pragma Inline (Set_Is_Folded_In_Parser);
+   pragma Inline (Set_Is_Generic_Contract_Pragma);
+   pragma Inline (Set_Is_Ghost_Pragma);
    pragma Inline (Set_Is_Ignored);
    pragma Inline (Set_Is_In_Discriminant_Check);
+   pragma Inline (Set_Is_Inherited);
    pragma Inline (Set_Is_Machine_Number);
    pragma Inline (Set_Is_Null_Loop);
    pragma Inline (Set_Is_Overloaded);

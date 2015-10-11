@@ -1,5 +1,5 @@
 /* All matcher functions.
-   Copyright (C) 2003-2014 Free Software Foundation, Inc.
+   Copyright (C) 2003-2015 Free Software Foundation, Inc.
    Contributed by Steven Bosscher
 
 This file is part of GCC.
@@ -122,6 +122,22 @@ gfc_common_head *gfc_get_common (const char *, int);
 
 /* openmp.c.  */
 
+/* OpenACC directive matchers.  */
+match gfc_match_oacc_cache (void);
+match gfc_match_oacc_wait (void);
+match gfc_match_oacc_update (void);
+match gfc_match_oacc_declare (void);
+match gfc_match_oacc_loop (void);
+match gfc_match_oacc_host_data (void);
+match gfc_match_oacc_data (void);
+match gfc_match_oacc_kernels (void);
+match gfc_match_oacc_kernels_loop (void);
+match gfc_match_oacc_parallel (void);
+match gfc_match_oacc_parallel_loop (void);
+match gfc_match_oacc_enter_data (void);
+match gfc_match_oacc_exit_data (void);
+match gfc_match_oacc_routine (void);
+
 /* OpenMP directive matchers.  */
 match gfc_match_omp_eos (void);
 match gfc_match_omp_atomic (void);
@@ -187,6 +203,7 @@ match gfc_match_generic (void);
 match gfc_match_function_decl (void);
 match gfc_match_entry (void);
 match gfc_match_subroutine (void);
+match gfc_match_submod_proc (void);
 match gfc_match_derived_decl (void);
 match gfc_match_final_decl (void);
 
@@ -275,6 +292,7 @@ match gfc_match_expr (gfc_expr **);
 
 /* module.c.  */
 match gfc_match_use (void);
+match gfc_match_submodule (void);
 void gfc_use_modules (void);
 
 #endif  /* GFC_MATCH_H  */

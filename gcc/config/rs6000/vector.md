@@ -3,7 +3,7 @@
 ;; expander, and the actual vector instructions will be in altivec.md and
 ;; vsx.md
 
-;; Copyright (C) 2009-2014 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2015 Free Software Foundation, Inc.
 ;; Contributed by Michael Meissner <meissner@linux.vnet.ibm.com>
 
 ;; This file is part of GCC.
@@ -36,13 +36,14 @@
 (define_mode_iterator VEC_K [V16QI V8HI V4SI V4SF])
 
 ;; Vector logical modes
-(define_mode_iterator VEC_L [V16QI V8HI V4SI V2DI V4SF V2DF V1TI TI])
+(define_mode_iterator VEC_L [V16QI V8HI V4SI V2DI V4SF V2DF V1TI TI KF TF])
 
-;; Vector modes for moves.  Don't do TImode here.
-(define_mode_iterator VEC_M [V16QI V8HI V4SI V2DI V4SF V2DF V1TI])
+;; Vector modes for moves.  Don't do TImode or TFmode here, since their
+;; moves are handled elsewhere.
+(define_mode_iterator VEC_M [V16QI V8HI V4SI V2DI V4SF V2DF V1TI KF])
 
 ;; Vector modes for types that don't need a realignment under VSX
-(define_mode_iterator VEC_N [V4SI V4SF V2DI V2DF V1TI])
+(define_mode_iterator VEC_N [V4SI V4SF V2DI V2DF V1TI KF TF])
 
 ;; Vector comparison modes
 (define_mode_iterator VEC_C [V16QI V8HI V4SI V2DI V4SF V2DF])
@@ -52,10 +53,6 @@
 
 ;; Vector modes for 64-bit base types
 (define_mode_iterator VEC_64 [V2DI V2DF])
-
-;; Vector reload iterator
-(define_mode_iterator VEC_R [V16QI V8HI V4SI V2DI V4SF V2DF V1TI
-			     SF SD SI DF DD DI TI])
 
 ;; Base type from vector mode
 (define_mode_attr VEC_base [(V16QI "QI")
@@ -99,12 +96,19 @@
 {
   if (can_create_pseudo_p ())
     {
-      if (CONSTANT_P (operands[1])
-	  && !easy_vector_constant (operands[1], <MODE>mode))
-	operands[1] = force_const_mem (<MODE>mode, operands[1]);
+      if (CONSTANT_P (operands[1]))
+	{
+	  if (FLOAT128_VECTOR_P (<MODE>mode))
+	    {
+	      if (!easy_fp_constant (operands[1], <MODE>mode))
+		operands[1] = force_const_mem (<MODE>mode, operands[1]);
+	    }
+	  else if (!easy_vector_constant (operands[1], <MODE>mode))
+	    operands[1] = force_const_mem (<MODE>mode, operands[1]);
+	}
 
-      else if (!vlogical_operand (operands[0], <MODE>mode)
-	       && !vlogical_operand (operands[1], <MODE>mode))
+      if (!vlogical_operand (operands[0], <MODE>mode)
+	  && !vlogical_operand (operands[1], <MODE>mode))
 	operands[1] = force_reg (<MODE>mode, operands[1]);
     }
   if (!BYTES_BIG_ENDIAN
@@ -184,49 +188,6 @@
 }")
 
 
-
-;; Reload patterns for vector operations.  We may need an additional base
-;; register to convert the reg+offset addressing to reg+reg for vector
-;; registers and reg+reg or (reg+reg)&(-16) addressing to just an index
-;; register for gpr registers.
-(define_expand "reload_<VEC_R:mode>_<P:mptrsize>_store"
-  [(parallel [(match_operand:VEC_R 0 "memory_operand" "m")
-              (match_operand:VEC_R 1 "gpc_reg_operand" "r")
-              (match_operand:P 2 "register_operand" "=&b")])]
-  "<P:tptrsize>"
-{
-  rs6000_secondary_reload_inner (operands[1], operands[0], operands[2], true);
-  DONE;
-})
-
-(define_expand "reload_<VEC_R:mode>_<P:mptrsize>_load"
-  [(parallel [(match_operand:VEC_R 0 "gpc_reg_operand" "=&r")
-              (match_operand:VEC_R 1 "memory_operand" "m")
-              (match_operand:P 2 "register_operand" "=&b")])]
-  "<P:tptrsize>"
-{
-  rs6000_secondary_reload_inner (operands[0], operands[1], operands[2], false);
-  DONE;
-})
-
-;; Reload sometimes tries to move the address to a GPR, and can generate
-;; invalid RTL for addresses involving AND -16.  Allow addresses involving
-;; reg+reg, reg+small constant, or just reg, all wrapped in an AND -16.
-
-(define_insn_and_split "*vec_reload_and_plus_<mptrsize>"
-  [(set (match_operand:P 0 "gpc_reg_operand" "=b")
-	(and:P (plus:P (match_operand:P 1 "gpc_reg_operand" "r")
-		       (match_operand:P 2 "reg_or_cint_operand" "rI"))
-	       (const_int -16)))]
-  "(TARGET_ALTIVEC || TARGET_VSX) && (reload_in_progress || reload_completed)"
-  "#"
-  "&& reload_completed"
-  [(set (match_dup 0)
-	(plus:P (match_dup 1)
-		(match_dup 2)))
-   (set (match_dup 0)
-	(and:P (match_dup 0)
-	       (const_int -16)))])
 
 ;; Generic floating point vector arithmetic support
 (define_expand "add<mode>3"
@@ -493,11 +454,24 @@
   "")
 
 (define_expand "vector_ge<mode>"
-  [(set (match_operand:VEC_C 0 "vlogical_operand" "")
-	(ge:VEC_C (match_operand:VEC_C 1 "vlogical_operand" "")
-		  (match_operand:VEC_C 2 "vlogical_operand" "")))]
+  [(set (match_operand:VEC_F 0 "vlogical_operand" "")
+	(ge:VEC_F (match_operand:VEC_F 1 "vlogical_operand" "")
+		  (match_operand:VEC_F 2 "vlogical_operand" "")))]
   "VECTOR_UNIT_ALTIVEC_OR_VSX_P (<MODE>mode)"
   "")
+
+; >= for integer vectors: swap operands and apply not-greater-than
+(define_expand "vector_nlt<mode>"
+  [(set (match_operand:VEC_I 3 "vlogical_operand" "")
+	(gt:VEC_I (match_operand:VEC_I 2 "vlogical_operand" "")
+		  (match_operand:VEC_I 1 "vlogical_operand" "")))
+   (set (match_operand:VEC_I 0 "vlogical_operand" "")
+        (not:VEC_I (match_dup 3)))]
+  "VECTOR_UNIT_ALTIVEC_OR_VSX_P (<MODE>mode)"
+  "
+{
+  operands[3] = gen_reg_rtx_and_attrs (operands[0]);
+}")
 
 (define_expand "vector_gtu<mode>"
   [(set (match_operand:VEC_I 0 "vint_operand" "")
@@ -506,12 +480,50 @@
   "VECTOR_UNIT_ALTIVEC_OR_VSX_P (<MODE>mode)"
   "")
 
+; >= for integer vectors: swap operands and apply not-greater-than
+(define_expand "vector_nltu<mode>"
+  [(set (match_operand:VEC_I 3 "vlogical_operand" "")
+	(gtu:VEC_I (match_operand:VEC_I 2 "vlogical_operand" "")
+	 	   (match_operand:VEC_I 1 "vlogical_operand" "")))
+   (set (match_operand:VEC_I 0 "vlogical_operand" "")
+        (not:VEC_I (match_dup 3)))]
+  "VECTOR_UNIT_ALTIVEC_OR_VSX_P (<MODE>mode)"
+  "
+{
+  operands[3] = gen_reg_rtx_and_attrs (operands[0]);
+}")
+
 (define_expand "vector_geu<mode>"
   [(set (match_operand:VEC_I 0 "vint_operand" "")
 	(geu:VEC_I (match_operand:VEC_I 1 "vint_operand" "")
 		   (match_operand:VEC_I 2 "vint_operand" "")))]
   "VECTOR_UNIT_ALTIVEC_OR_VSX_P (<MODE>mode)"
   "")
+
+; <= for integer vectors: apply not-greater-than
+(define_expand "vector_ngt<mode>"
+  [(set (match_operand:VEC_I 3 "vlogical_operand" "")
+	(gt:VEC_I (match_operand:VEC_I 1 "vlogical_operand" "")
+		  (match_operand:VEC_I 2 "vlogical_operand" "")))
+   (set (match_operand:VEC_I 0 "vlogical_operand" "")
+        (not:VEC_I (match_dup 3)))]
+  "VECTOR_UNIT_ALTIVEC_OR_VSX_P (<MODE>mode)"
+  "
+{
+  operands[3] = gen_reg_rtx_and_attrs (operands[0]);
+}")
+
+(define_expand "vector_ngtu<mode>"
+  [(set (match_operand:VEC_I 3 "vlogical_operand" "")
+	(gtu:VEC_I (match_operand:VEC_I 1 "vlogical_operand" "")
+	 	   (match_operand:VEC_I 2 "vlogical_operand" "")))
+   (set (match_operand:VEC_I 0 "vlogical_operand" "")
+        (not:VEC_I (match_dup 3)))]
+  "VECTOR_UNIT_ALTIVEC_OR_VSX_P (<MODE>mode)"
+  "
+{
+  operands[3] = gen_reg_rtx_and_attrs (operands[0]);
+}")
 
 (define_insn_and_split "*vector_uneq<mode>"
   [(set (match_operand:VEC_F 0 "vfloat_operand" "")
@@ -960,53 +972,11 @@
  "VECTOR_MEM_VSX_P (<MODE>mode) && TARGET_ALLOW_MOVMISALIGN"
  "")
 
-
-;; Vector shift left in bits.  Currently supported ony for shift
-;; amounts that can be expressed as byte shifts (divisible by 8).
-;; General shift amounts can be supported using vslo + vsl. We're
-;; not expecting to see these yet (the vectorizer currently
-;; generates only shifts divisible by byte_size).
-(define_expand "vec_shl_<mode>"
-  [(match_operand:VEC_L 0 "vlogical_operand" "")
-   (match_operand:VEC_L 1 "vlogical_operand" "")
-   (match_operand:QI 2 "reg_or_short_operand" "")]
-  "TARGET_ALTIVEC"
-  "
-{
-  rtx bitshift = operands[2];
-  rtx shift;
-  rtx insn;
-  HOST_WIDE_INT bitshift_val;
-  HOST_WIDE_INT byteshift_val;
-
-  if (! CONSTANT_P (bitshift))
-    FAIL;
-  bitshift_val = INTVAL (bitshift);
-  if (bitshift_val & 0x7)
-    FAIL;
-  byteshift_val = bitshift_val >> 3;
-  if (TARGET_VSX && (byteshift_val & 0x3) == 0)
-    {
-      shift = gen_rtx_CONST_INT (QImode, byteshift_val >> 2);
-      insn = gen_vsx_xxsldwi_<mode> (operands[0], operands[1], operands[1],
-				     shift);
-    }
-  else
-    {
-      shift = gen_rtx_CONST_INT (QImode, byteshift_val);
-      insn = gen_altivec_vsldoi_<mode> (operands[0], operands[1], operands[1],
-					shift);
-    }
-
-  emit_insn (insn);
-  DONE;
-}")
-
 ;; Vector shift right in bits. Currently supported ony for shift
 ;; amounts that can be expressed as byte shifts (divisible by 8).
 ;; General shift amounts can be supported using vsro + vsr. We're
 ;; not expecting to see these yet (the vectorizer currently
-;; generates only shifts divisible by byte_size).
+;; generates only shifts by a whole number of vector elements).
 (define_expand "vec_shr_<mode>"
   [(match_operand:VEC_L 0 "vlogical_operand" "")
    (match_operand:VEC_L 1 "vlogical_operand" "")
@@ -1025,7 +995,9 @@
   bitshift_val = INTVAL (bitshift);
   if (bitshift_val & 0x7)
     FAIL;
-  byteshift_val = 16 - (bitshift_val >> 3);
+  byteshift_val = (bitshift_val >> 3);
+  if (!BYTES_BIG_ENDIAN)
+    byteshift_val = 16 - byteshift_val;
   if (TARGET_VSX && (byteshift_val & 0x3) == 0)
     {
       shift = gen_rtx_CONST_INT (QImode, byteshift_val >> 2);
@@ -1136,7 +1108,7 @@
       /* We need to make a note that we clobber SPEFSCR.  */
       rtx par = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (2));
 
-      XVECEXP (par, 0, 0) = gen_rtx_SET (VOIDmode, operands[0],
+      XVECEXP (par, 0, 0) = gen_rtx_SET (operands[0],
                                          gen_rtx_PLUS (V2SFmode, operands[1], operands[2]));
       XVECEXP (par, 0, 1) = gen_rtx_CLOBBER (VOIDmode, gen_rtx_REG (SImode, SPEFSCR_REGNO));
       emit_insn (par);
@@ -1156,7 +1128,7 @@
       /* We need to make a note that we clobber SPEFSCR.  */
       rtx par = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (2));
 
-      XVECEXP (par, 0, 0) = gen_rtx_SET (VOIDmode, operands[0],
+      XVECEXP (par, 0, 0) = gen_rtx_SET (operands[0],
                                          gen_rtx_MINUS (V2SFmode, operands[1], operands[2]));
       XVECEXP (par, 0, 1) = gen_rtx_CLOBBER (VOIDmode, gen_rtx_REG (SImode, SPEFSCR_REGNO));
       emit_insn (par);
@@ -1176,7 +1148,7 @@
       /* We need to make a note that we clobber SPEFSCR.  */
       rtx par = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (2));
 
-      XVECEXP (par, 0, 0) = gen_rtx_SET (VOIDmode, operands[0],
+      XVECEXP (par, 0, 0) = gen_rtx_SET (operands[0],
                                          gen_rtx_MULT (V2SFmode, operands[1], operands[2]));
       XVECEXP (par, 0, 1) = gen_rtx_CLOBBER (VOIDmode, gen_rtx_REG (SImode, SPEFSCR_REGNO));
       emit_insn (par);
@@ -1196,7 +1168,7 @@
       /* We need to make a note that we clobber SPEFSCR.  */
       rtx par = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (2));
 
-      XVECEXP (par, 0, 0) = gen_rtx_SET (VOIDmode, operands[0],
+      XVECEXP (par, 0, 0) = gen_rtx_SET (operands[0],
                                          gen_rtx_DIV (V2SFmode, operands[1], operands[2]));
       XVECEXP (par, 0, 1) = gen_rtx_CLOBBER (VOIDmode, gen_rtx_REG (SImode, SPEFSCR_REGNO));
       emit_insn (par);

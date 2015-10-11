@@ -1,5 +1,5 @@
 /* Subroutines used for the C front end for Xilinx MicroBlaze.
-   Copyright (C) 2010-2014 Free Software Foundation, Inc.
+   Copyright (C) 2010-2015 Free Software Foundation, Inc.
 
    Contributed by Michael Eager <eager@eagercon.com>.
 
@@ -24,6 +24,7 @@
 #include "coretypes.h"
 #include "tm.h"
 #include "cpplib.h"
+#include "alias.h"
 #include "tree.h"
 #include "c-family/c-common.h"
 #include "tm_p.h"

@@ -1,7 +1,7 @@
-/* This file contains routines to construct GNU OpenMP constructs,
+/* This file contains routines to construct OpenACC and OpenMP constructs,
    called from parsing in the C and C++ front ends.
 
-   Copyright (C) 2005-2014 Free Software Foundation, Inc.
+   Copyright (C) 2005-2015 Free Software Foundation, Inc.
    Contributed by Richard Henderson <rth@redhat.com>,
 		  Diego Novillo <dnovillo@redhat.com>.
 
@@ -24,12 +24,54 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "c-common.h"
 #include "c-pragma.h"
 #include "gimple-expr.h"
 #include "langhooks.h"
+#include "omp-low.h"
+#include "gomp-constants.h"
 
+
+/* Complete a #pragma oacc wait construct.  LOC is the location of
+   the #pragma.  */
+
+tree
+c_finish_oacc_wait (location_t loc, tree parms, tree clauses)
+{
+  const int nparms = list_length (parms);
+  tree stmt, t;
+  vec<tree, va_gc> *args;
+
+  vec_alloc (args, nparms + 2);
+  stmt = builtin_decl_explicit (BUILT_IN_GOACC_WAIT);
+
+  if (find_omp_clause (clauses, OMP_CLAUSE_ASYNC))
+    t = OMP_CLAUSE_ASYNC_EXPR (clauses);
+  else
+    t = build_int_cst (integer_type_node, GOMP_ASYNC_SYNC);
+
+  args->quick_push (t);
+  args->quick_push (build_int_cst (integer_type_node, nparms));
+
+  for (t = parms; t; t = TREE_CHAIN (t))
+    {
+      if (TREE_CODE (OMP_CLAUSE_WAIT_EXPR (t)) == INTEGER_CST)
+	args->quick_push (build_int_cst (integer_type_node,
+			TREE_INT_CST_LOW (OMP_CLAUSE_WAIT_EXPR (t))));
+      else
+	args->quick_push (OMP_CLAUSE_WAIT_EXPR (t));
+    }
+
+  stmt = build_call_expr_loc_vec (loc, stmt, args);
+  add_stmt (stmt);
+
+  vec_free (args);
+
+  return stmt;
+}
 
 /* Complete a #pragma omp master construct.  STMT is the structured-block
    that follows the pragma.  LOC is the l*/
@@ -156,6 +198,9 @@ c_finish_omp_atomic (location_t loc, enum tree_code code,
       return error_mark_node;
     }
 
+  if (opcode == RDIV_EXPR)
+    opcode = TRUNC_DIV_EXPR;
+
   /* ??? Validate that rhs does not overlap lhs.  */
 
   /* Take and save the address of the lhs.  From then on we'll reference it
@@ -166,11 +211,11 @@ c_finish_omp_atomic (location_t loc, enum tree_code code,
   addr = save_expr (addr);
   if (TREE_CODE (addr) != SAVE_EXPR
       && (TREE_CODE (addr) != ADDR_EXPR
-	  || TREE_CODE (TREE_OPERAND (addr, 0)) != VAR_DECL))
+	  || !VAR_P (TREE_OPERAND (addr, 0))))
     {
       /* Make sure LHS is simple enough so that goa_lhs_expr_p can recognize
 	 it even after unsharing function body.  */
-      tree var = create_tmp_var_raw (TREE_TYPE (addr), NULL);
+      tree var = create_tmp_var_raw (TREE_TYPE (addr));
       DECL_CONTEXT (var) = current_function_decl;
       addr = build4 (TARGET_EXPR, TREE_TYPE (addr), var, addr, NULL, NULL);
     }
@@ -190,7 +235,7 @@ c_finish_omp_atomic (location_t loc, enum tree_code code,
      to do this, and then take it apart again.  */
   if (swapped)
     {
-      rhs = build2_loc (loc, opcode, TREE_TYPE (lhs), rhs, lhs);
+      rhs = build_binary_op (loc, opcode, rhs, lhs, 1);
       opcode = NOP_EXPR;
     }
   bool save = in_late_binary_op;
@@ -218,8 +263,8 @@ c_finish_omp_atomic (location_t loc, enum tree_code code,
   /* Generally it is hard to prove lhs1 and lhs are the same memory
      location, just diagnose different variables.  */
   if (rhs1
-      && TREE_CODE (rhs1) == VAR_DECL
-      && TREE_CODE (lhs) == VAR_DECL
+      && VAR_P (rhs1)
+      && VAR_P (lhs)
       && rhs1 != lhs)
     {
       if (code == OMP_ATOMIC)
@@ -233,7 +278,7 @@ c_finish_omp_atomic (location_t loc, enum tree_code code,
     {
       /* Generally it is hard to prove lhs1 and lhs are the same memory
 	 location, just diagnose different variables.  */
-      if (lhs1 && TREE_CODE (lhs1) == VAR_DECL && TREE_CODE (lhs) == VAR_DECL)
+      if (lhs1 && VAR_P (lhs1) && VAR_P (lhs))
 	{
 	  if (lhs1 != lhs)
 	    {
@@ -293,7 +338,7 @@ c_finish_omp_flush (location_t loc)
 }
 
 
-/* Check and canonicalize #pragma omp for increment expression.
+/* Check and canonicalize OMP_FOR increment expression.
    Helper function for c_finish_omp_for.  */
 
 static tree
@@ -342,7 +387,7 @@ check_omp_for_incr_expr (location_t loc, tree exp, tree decl)
 	  {
 	    tree op1 = TREE_OPERAND (exp, 1);
 	    tree temp = TARGET_EXPR_SLOT (op0);
-	    if (TREE_CODE_CLASS (TREE_CODE (op1)) == tcc_binary
+	    if (BINARY_CLASS_P (op1)
 		&& TREE_OPERAND (op1, 1) == temp)
 	      {
 		op1 = copy_node (op1);
@@ -381,7 +426,7 @@ c_omp_for_incr_canonicalize_ptr (location_t loc, tree decl, tree incr)
   return incr;
 }
 
-/* Validate and emit code for the OpenMP directive #pragma omp for.
+/* Validate and generate OMP_FOR.
    DECLV is a vector of iteration variables, for each collapsed loop.
    INITV, CONDV and INCRV are vectors containing initialization
    expressions, controlling predicates and increment expressions.
@@ -995,6 +1040,8 @@ c_omp_declare_simd_clauses_to_numbers (tree parms, tree clauses)
       for (i = 0; i < len; i++)
 	OMP_CLAUSE_CHAIN (clvec[i]) = (i < len - 1) ? clvec[i + 1] : NULL_TREE;
     }
+  else
+    clauses = NULL_TREE;
   clvec.release ();
   return clauses;
 }

@@ -1,6 +1,6 @@
 /* Various declarations for pretty formatting of GIMPLE statements and
    expressions.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,7 +21,6 @@ along with GCC; see the file COPYING3.  If not see
 #ifndef GCC_GIMPLE_PRETTY_PRINT_H
 #define GCC_GIMPLE_PRETTY_PRINT_H
 
-#include "pretty-print.h"
 #include "tree-pretty-print.h"
 
 /* In gimple-pretty-print.c  */

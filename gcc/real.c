@@ -1,5 +1,5 @@
 /* real.c - software floating point emulation.
-   Copyright (C) 1993-2014 Free Software Foundation, Inc.
+   Copyright (C) 1993-2015 Free Software Foundation, Inc.
    Contributed by Stephen L. Moshier (moshier@world.std.com).
    Re-written by Richard Henderson <rth@redhat.com>
 
@@ -23,13 +23,14 @@
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "diagnostic-core.h"
-#include "real.h"
 #include "realmpfr.h"
 #include "tm_p.h"
 #include "dfp.h"
-#include "wide-int.h"
+#include "rtl.h"
+#include "options.h"
 
 /* The floating point model used internally is not exactly IEEE 754
    compliant, and close to the description in the ISO C99 standard,
@@ -1254,7 +1255,7 @@ real_identical (const REAL_VALUE_TYPE *a, const REAL_VALUE_TYPE *b)
    mode MODE.  Return true if successful.  */
 
 bool
-exact_real_inverse (enum machine_mode mode, REAL_VALUE_TYPE *r)
+exact_real_inverse (machine_mode mode, REAL_VALUE_TYPE *r)
 {
   const REAL_VALUE_TYPE *one = real_digit (1);
   REAL_VALUE_TYPE u;
@@ -1292,7 +1293,7 @@ exact_real_inverse (enum machine_mode mode, REAL_VALUE_TYPE *r)
    in TMODE.  */
 
 bool
-real_can_shorten_arithmetic (enum machine_mode imode, enum machine_mode tmode)
+real_can_shorten_arithmetic (machine_mode imode, machine_mode tmode)
 {
   const struct real_format *tfmt, *ifmt;
   tfmt = REAL_MODE_FORMAT (tmode);
@@ -1501,7 +1502,7 @@ rtd_divmod (REAL_VALUE_TYPE *num, REAL_VALUE_TYPE *den)
 void
 real_to_decimal_for_mode (char *str, const REAL_VALUE_TYPE *r_orig,
 			  size_t buf_size, size_t digits,
-			  int crop_trailing_zeros, enum machine_mode mode)
+			  int crop_trailing_zeros, machine_mode mode)
 {
   const struct real_format *fmt = NULL;
   const REAL_VALUE_TYPE *one, *ten;
@@ -2064,9 +2065,10 @@ real_from_string (REAL_VALUE_TYPE *r, const char *str)
 	     because the hex digits used in real_from_mpfr did not
 	     start with a digit 8 to f, but the exponent bounds above
 	     should have avoided underflow or overflow.  */
-	  gcc_assert (r->cl = rvc_normal);
+	  gcc_assert (r->cl == rvc_normal);
 	  /* Set a sticky bit if mpfr_strtofr was inexact.  */
 	  r->sig[0] |= inexact;
+	  mpfr_clear (m);
 	}
     }
 
@@ -2089,7 +2091,7 @@ real_from_string (REAL_VALUE_TYPE *r, const char *str)
 /* Legacy.  Similar, but return the result directly.  */
 
 REAL_VALUE_TYPE
-real_from_string2 (const char *s, enum machine_mode mode)
+real_from_string2 (const char *s, machine_mode mode)
 {
   REAL_VALUE_TYPE r;
 
@@ -2103,7 +2105,7 @@ real_from_string2 (const char *s, enum machine_mode mode)
 /* Initialize R from string S and desired MODE. */
 
 void
-real_from_string3 (REAL_VALUE_TYPE *r, const char *s, enum machine_mode mode)
+real_from_string3 (REAL_VALUE_TYPE *r, const char *s, machine_mode mode)
 {
   if (DECIMAL_FLOAT_MODE_P (mode))
     decimal_real_from_string (r, s);
@@ -2117,7 +2119,7 @@ real_from_string3 (REAL_VALUE_TYPE *r, const char *s, enum machine_mode mode)
 /* Initialize R from the wide_int VAL_IN.  The MODE is not VOIDmode,*/
 
 void
-real_from_integer (REAL_VALUE_TYPE *r, enum machine_mode mode,
+real_from_integer (REAL_VALUE_TYPE *r, machine_mode mode,
 		   const wide_int_ref &val_in, signop sgn)
 {
   if (val_in == 0)
@@ -2428,7 +2430,7 @@ real_inf (REAL_VALUE_TYPE *r)
 
 bool
 real_nan (REAL_VALUE_TYPE *r, const char *str, int quiet,
-	  enum machine_mode mode)
+	  machine_mode mode)
 {
   const struct real_format *fmt;
 
@@ -2519,7 +2521,7 @@ real_nan (REAL_VALUE_TYPE *r, const char *str, int quiet,
    If SIGN is nonzero, R is set to the most negative finite value.  */
 
 void
-real_maxval (REAL_VALUE_TYPE *r, int sign, enum machine_mode mode)
+real_maxval (REAL_VALUE_TYPE *r, int sign, machine_mode mode)
 {
   const struct real_format *fmt;
   int np2;
@@ -2554,7 +2556,7 @@ real_maxval (REAL_VALUE_TYPE *r, int sign, enum machine_mode mode)
 /* Fills R with 2**N.  */
 
 void
-real_2expN (REAL_VALUE_TYPE *r, int n, enum machine_mode fmode)
+real_2expN (REAL_VALUE_TYPE *r, int n, machine_mode fmode)
 {
   memset (r, 0, sizeof (*r));
 
@@ -2701,7 +2703,7 @@ round_for_format (const struct real_format *fmt, REAL_VALUE_TYPE *r)
 /* Extend or truncate to a new mode.  */
 
 void
-real_convert (REAL_VALUE_TYPE *r, enum machine_mode mode,
+real_convert (REAL_VALUE_TYPE *r, machine_mode mode,
 	      const REAL_VALUE_TYPE *a)
 {
   const struct real_format *fmt;
@@ -2724,7 +2726,7 @@ real_convert (REAL_VALUE_TYPE *r, enum machine_mode mode,
 /* Legacy.  Likewise, except return the struct directly.  */
 
 REAL_VALUE_TYPE
-real_value_truncate (enum machine_mode mode, REAL_VALUE_TYPE a)
+real_value_truncate (machine_mode mode, REAL_VALUE_TYPE a)
 {
   REAL_VALUE_TYPE r;
   real_convert (&r, mode, &a);
@@ -2734,7 +2736,7 @@ real_value_truncate (enum machine_mode mode, REAL_VALUE_TYPE a)
 /* Return true if truncating to MODE is exact.  */
 
 bool
-exact_real_truncate (enum machine_mode mode, const REAL_VALUE_TYPE *a)
+exact_real_truncate (machine_mode mode, const REAL_VALUE_TYPE *a)
 {
   const struct real_format *fmt;
   REAL_VALUE_TYPE t;
@@ -2779,7 +2781,7 @@ real_to_target_fmt (long *buf, const REAL_VALUE_TYPE *r_orig,
 /* Similar, but look up the format from MODE.  */
 
 long
-real_to_target (long *buf, const REAL_VALUE_TYPE *r, enum machine_mode mode)
+real_to_target (long *buf, const REAL_VALUE_TYPE *r, machine_mode mode)
 {
   const struct real_format *fmt;
 
@@ -2803,7 +2805,7 @@ real_from_target_fmt (REAL_VALUE_TYPE *r, const long *buf,
 /* Similar, but look up the format from MODE.  */
 
 void
-real_from_target (REAL_VALUE_TYPE *r, const long *buf, enum machine_mode mode)
+real_from_target (REAL_VALUE_TYPE *r, const long *buf, machine_mode mode)
 {
   const struct real_format *fmt;
 
@@ -2818,7 +2820,7 @@ real_from_target (REAL_VALUE_TYPE *r, const long *buf, enum machine_mode mode)
 /* ??? Legacy.  Should get access to real_format directly.  */
 
 int
-significand_size (enum machine_mode mode)
+significand_size (machine_mode mode)
 {
   const struct real_format *fmt;
 
@@ -3019,7 +3021,8 @@ const struct real_format ieee_single_format =
     true,
     true,
     true,
-    false
+    false,
+    "ieee_single"
   };
 
 const struct real_format mips_single_format =
@@ -3040,7 +3043,8 @@ const struct real_format mips_single_format =
     true,
     true,
     false,
-    true
+    true,
+    "mips_single"
   };
 
 const struct real_format motorola_single_format =
@@ -3061,7 +3065,8 @@ const struct real_format motorola_single_format =
     true,
     true,
     true,
-    true
+    true,
+    "motorola_single"
   };
 
 /*  SPU Single Precision (Extended-Range Mode) format is the same as IEEE
@@ -3093,7 +3098,8 @@ const struct real_format spu_single_format =
     true,
     true,
     false,
-    false
+    false,
+    "spu_single"
   };
 
 /* IEEE double-precision format.  */
@@ -3302,7 +3308,8 @@ const struct real_format ieee_double_format =
     true,
     true,
     true,
-    false
+    false,
+    "ieee_double"
   };
 
 const struct real_format mips_double_format =
@@ -3323,7 +3330,8 @@ const struct real_format mips_double_format =
     true,
     true,
     false,
-    true
+    true,
+    "mips_double"
   };
 
 const struct real_format motorola_double_format =
@@ -3344,7 +3352,8 @@ const struct real_format motorola_double_format =
     true,
     true,
     true,
-    true
+    true,
+    "motorola_double"
   };
 
 /* IEEE extended real format.  This comes in three flavors: Intel's as
@@ -3688,7 +3697,8 @@ const struct real_format ieee_extended_motorola_format =
     true,
     true,
     true,
-    true
+    true,
+    "ieee_extended_motorola"
   };
 
 const struct real_format ieee_extended_intel_96_format =
@@ -3709,7 +3719,8 @@ const struct real_format ieee_extended_intel_96_format =
     true,
     true,
     true,
-    false
+    false,
+    "ieee_extended_intel_96"
   };
 
 const struct real_format ieee_extended_intel_128_format =
@@ -3730,7 +3741,8 @@ const struct real_format ieee_extended_intel_128_format =
     true,
     true,
     true,
-    false
+    false,
+    "ieee_extended_intel_128"
   };
 
 /* The following caters to i386 systems that set the rounding precision
@@ -3753,7 +3765,8 @@ const struct real_format ieee_extended_intel_96_round_53_format =
     true,
     true,
     true,
-    false
+    false,
+    "ieee_extended_intel_96_round_53"
   };
 
 /* IBM 128-bit extended precision format: a pair of IEEE double precision
@@ -3841,7 +3854,8 @@ const struct real_format ibm_extended_format =
     true,
     true,
     true,
-    false
+    false,
+    "ibm_extended"
   };
 
 const struct real_format mips_extended_format =
@@ -3862,7 +3876,8 @@ const struct real_format mips_extended_format =
     true,
     true,
     false,
-    true
+    true,
+    "mips_extended"
   };
 
 
@@ -4125,7 +4140,8 @@ const struct real_format ieee_quad_format =
     true,
     true,
     true,
-    false
+    false,
+    "ieee_quad"
   };
 
 const struct real_format mips_quad_format =
@@ -4146,7 +4162,8 @@ const struct real_format mips_quad_format =
     true,
     true,
     false,
-    true
+    true,
+    "mips_quad"
   };
 
 /* Descriptions of VAX floating point formats can be found beginning at
@@ -4446,7 +4463,8 @@ const struct real_format vax_f_format =
     false,
     false,
     false,
-    false
+    false,
+    "vax_f"
   };
 
 const struct real_format vax_d_format =
@@ -4467,7 +4485,8 @@ const struct real_format vax_d_format =
     false,
     false,
     false,
-    false
+    false,
+    "vax_d"
   };
 
 const struct real_format vax_g_format =
@@ -4488,7 +4507,8 @@ const struct real_format vax_g_format =
     false,
     false,
     false,
-    false
+    false,
+    "vax_g"
   };
 
 /* Encode real R into a single precision DFP value in BUF.  */
@@ -4564,7 +4584,8 @@ const struct real_format decimal_single_format =
     true,
     true,
     true,
-    false
+    false,
+    "decimal_single"
   };
 
 /* Double precision decimal floating point (IEEE 754). */
@@ -4586,7 +4607,8 @@ const struct real_format decimal_double_format =
     true,
     true,
     true,
-    false
+    false,
+    "decimal_double"
   };
 
 /* Quad precision decimal floating point (IEEE 754). */
@@ -4608,7 +4630,8 @@ const struct real_format decimal_quad_format =
     true,
     true,
     true,
-    false
+    false,
+    "decimal_quad"
   };
 
 /* Encode half-precision floats.  This routine is used both for the IEEE
@@ -4745,7 +4768,8 @@ const struct real_format ieee_half_format =
     true,
     true,
     true,
-    false
+    false,
+    "ieee_half"
   };
 
 /* ARM's alternative half-precision format, similar to IEEE but with
@@ -4769,7 +4793,8 @@ const struct real_format arm_half_format =
     true,
     true,
     false,
-    false
+    false,
+    "arm_half"
   };
 
 /* A synthetic "format" for internal arithmetic.  It's the size of the
@@ -4814,7 +4839,8 @@ const struct real_format real_internal_format =
     false,
     true,
     true,
-    false
+    false,
+    "real_internal"
   };
 
 /* Calculate X raised to the integer exponent N in mode MODE and store
@@ -4824,7 +4850,7 @@ const struct real_format real_internal_format =
    Algorithms", "The Art of Computer Programming", Volume 2.  */
 
 bool
-real_powi (REAL_VALUE_TYPE *r, enum machine_mode mode,
+real_powi (REAL_VALUE_TYPE *r, machine_mode mode,
 	   const REAL_VALUE_TYPE *x, HOST_WIDE_INT n)
 {
   unsigned HOST_WIDE_INT bit;
@@ -4874,7 +4900,7 @@ real_powi (REAL_VALUE_TYPE *r, enum machine_mode mode,
    towards zero, placing the result in R in mode MODE.  */
 
 void
-real_trunc (REAL_VALUE_TYPE *r, enum machine_mode mode,
+real_trunc (REAL_VALUE_TYPE *r, machine_mode mode,
 	    const REAL_VALUE_TYPE *x)
 {
   do_fix_trunc (r, x);
@@ -4886,7 +4912,7 @@ real_trunc (REAL_VALUE_TYPE *r, enum machine_mode mode,
    down, placing the result in R in mode MODE.  */
 
 void
-real_floor (REAL_VALUE_TYPE *r, enum machine_mode mode,
+real_floor (REAL_VALUE_TYPE *r, machine_mode mode,
 	    const REAL_VALUE_TYPE *x)
 {
   REAL_VALUE_TYPE t;
@@ -4904,7 +4930,7 @@ real_floor (REAL_VALUE_TYPE *r, enum machine_mode mode,
    up, placing the result in R in mode MODE.  */
 
 void
-real_ceil (REAL_VALUE_TYPE *r, enum machine_mode mode,
+real_ceil (REAL_VALUE_TYPE *r, machine_mode mode,
 	   const REAL_VALUE_TYPE *x)
 {
   REAL_VALUE_TYPE t;
@@ -4922,7 +4948,7 @@ real_ceil (REAL_VALUE_TYPE *r, enum machine_mode mode,
    zero.  */
 
 void
-real_round (REAL_VALUE_TYPE *r, enum machine_mode mode,
+real_round (REAL_VALUE_TYPE *r, machine_mode mode,
 	    const REAL_VALUE_TYPE *x)
 {
   do_add (r, x, &dconsthalf, x->sign);
@@ -4942,7 +4968,7 @@ real_copysign (REAL_VALUE_TYPE *r, const REAL_VALUE_TYPE *x)
 /* Check whether the real constant value given is an integer.  */
 
 bool
-real_isinteger (const REAL_VALUE_TYPE *c, enum machine_mode mode)
+real_isinteger (const REAL_VALUE_TYPE *c, machine_mode mode)
 {
   REAL_VALUE_TYPE cint;
 
@@ -4980,4 +5006,108 @@ get_max_float (const struct real_format *fmt, char *buf, size_t len)
     }
 
   gcc_assert (strlen (buf) < len);
+}
+
+/* True if mode M has a NaN representation and
+   the treatment of NaN operands is important.  */
+
+bool
+HONOR_NANS (machine_mode m)
+{
+  return MODE_HAS_NANS (m) && !flag_finite_math_only;
+}
+
+bool
+HONOR_NANS (const_tree t)
+{
+  return HONOR_NANS (element_mode (t));
+}
+
+bool
+HONOR_NANS (const_rtx x)
+{
+  return HONOR_NANS (GET_MODE (x));
+}
+
+/* Like HONOR_NANs, but true if we honor signaling NaNs (or sNaNs).  */
+
+bool
+HONOR_SNANS (machine_mode m)
+{
+  return flag_signaling_nans && HONOR_NANS (m);
+}
+
+bool
+HONOR_SNANS (const_tree t)
+{
+  return HONOR_SNANS (element_mode (t));
+}
+
+bool
+HONOR_SNANS (const_rtx x)
+{
+  return HONOR_SNANS (GET_MODE (x));
+}
+
+/* As for HONOR_NANS, but true if the mode can represent infinity and
+   the treatment of infinite values is important.  */
+
+bool
+HONOR_INFINITIES (machine_mode m)
+{
+  return MODE_HAS_INFINITIES (m) && !flag_finite_math_only;
+}
+
+bool
+HONOR_INFINITIES (const_tree t)
+{
+  return HONOR_INFINITIES (element_mode (t));
+}
+
+bool
+HONOR_INFINITIES (const_rtx x)
+{
+  return HONOR_INFINITIES (GET_MODE (x));
+}
+
+/* Like HONOR_NANS, but true if the given mode distinguishes between
+   positive and negative zero, and the sign of zero is important.  */
+
+bool
+HONOR_SIGNED_ZEROS (machine_mode m)
+{
+  return MODE_HAS_SIGNED_ZEROS (m) && flag_signed_zeros;
+}
+
+bool
+HONOR_SIGNED_ZEROS (const_tree t)
+{
+  return HONOR_SIGNED_ZEROS (element_mode (t));
+}
+
+bool
+HONOR_SIGNED_ZEROS (const_rtx x)
+{
+  return HONOR_SIGNED_ZEROS (GET_MODE (x));
+}
+
+/* Like HONOR_NANS, but true if given mode supports sign-dependent rounding,
+   and the rounding mode is important.  */
+
+bool
+HONOR_SIGN_DEPENDENT_ROUNDING (machine_mode m)
+{
+  return MODE_HAS_SIGN_DEPENDENT_ROUNDING (m) && flag_rounding_math;
+}
+
+bool
+HONOR_SIGN_DEPENDENT_ROUNDING (const_tree t)
+{
+  return HONOR_SIGN_DEPENDENT_ROUNDING (element_mode (t));
+}
+
+bool
+HONOR_SIGN_DEPENDENT_ROUNDING (const_rtx x)
+{
+  return HONOR_SIGN_DEPENDENT_ROUNDING (GET_MODE (x));
 }

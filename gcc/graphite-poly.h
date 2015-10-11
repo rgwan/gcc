@@ -1,5 +1,5 @@
 /* Graphite polyhedral representation.
-   Copyright (C) 2009-2014 Free Software Foundation, Inc.
+   Copyright (C) 2009-2015 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <sebastian.pop@amd.com> and
    Tobias Grosser <grosser@fim.uni-passau.de>.
 
@@ -21,6 +21,13 @@ along with GCC; see the file COPYING3.  If not see
 
 #ifndef GCC_GRAPHITE_POLY_H
 #define GCC_GRAPHITE_POLY_H
+
+#include "sese.h"
+
+#ifndef HAVE_ISL_OPTIONS_SET_SCHEDULE_SERIALIZE_SCCS
+# define isl_stat int
+# define isl_stat_ok 0
+#endif
 
 typedef struct poly_dr *poly_dr_p;
 
@@ -175,7 +182,7 @@ struct poly_dr
 
      In the example, the vector "R C O I L P" is "7 7 3 2 0 1".  */
   isl_map *accesses;
-  isl_set *extent;
+  isl_set *subscript_sizes;
 
   /* Data reference's base object set number, we must assure 2 pdrs are in the
      same base object set before dependency checking.  */
@@ -349,6 +356,9 @@ struct poly_bb
   poly_scattering_p _saved;
   isl_map *saved;
 
+  /* For tiling, the map for computing the separating class.  */
+  isl_map *map_sepclass;
+
   /* True when this PBB contains only a reduction statement.  */
   bool is_reduction;
 };
@@ -377,14 +387,12 @@ extern void print_pbb_domain (FILE *, poly_bb_p, int);
 extern void print_pbb (FILE *, poly_bb_p, int);
 extern void print_scop_context (FILE *, scop_p, int);
 extern void print_scop (FILE *, scop_p, int);
-extern void print_cloog (FILE *, scop_p, int);
 extern void debug_pbb_domain (poly_bb_p, int);
 extern void debug_pbb (poly_bb_p, int);
 extern void print_pdrs (FILE *, poly_bb_p, int);
 extern void debug_pdrs (poly_bb_p, int);
 extern void debug_scop_context (scop_p, int);
 extern void debug_scop (scop_p, int);
-extern void debug_cloog (scop_p, int);
 extern void print_scop_params (FILE *, scop_p, int);
 extern void debug_scop_params (scop_p, int);
 extern void print_iteration_domain (FILE *, poly_bb_p, int);
@@ -1337,7 +1345,7 @@ lst_remove_all_before_excluding_pbb (lst_p loop, poly_bb_p pbb, bool before)
 struct scop
 {
   /* A SCOP is defined as a SESE region.  */
-  void *region;
+  sese region;
 
   /* Number of parameters in SCoP.  */
   graphite_dim_t nb_params;
@@ -1382,14 +1390,14 @@ struct scop
 };
 
 #define SCOP_BBS(S) (S->bbs)
-#define SCOP_REGION(S) ((sese) S->region)
+#define SCOP_REGION(S) (S->region)
 #define SCOP_CONTEXT(S) (NULL)
 #define SCOP_ORIGINAL_SCHEDULE(S) (S->original_schedule)
 #define SCOP_TRANSFORMED_SCHEDULE(S) (S->transformed_schedule)
 #define SCOP_SAVED_SCHEDULE(S) (S->saved_schedule)
 #define POLY_SCOP_P(S) (S->poly_scop_p)
 
-extern scop_p new_scop (void *);
+extern scop_p new_scop (sese);
 extern void free_scop (scop_p);
 extern void free_scops (vec<scop_p> );
 extern void print_generated_program (FILE *, scop_p);
@@ -1402,12 +1410,11 @@ extern int scop_max_loop_depth (scop_p);
 extern int unify_scattering_dimensions (scop_p);
 extern bool apply_poly_transforms (scop_p);
 extern bool graphite_legal_transform (scop_p);
-extern void cloog_checksum (scop_p);
 
 /* Set the region of SCOP to REGION.  */
 
 static inline void
-scop_set_region (scop_p scop, void *region)
+scop_set_region (scop_p scop, sese region)
 {
   scop->region = region;
 }

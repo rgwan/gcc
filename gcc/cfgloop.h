@@ -1,5 +1,5 @@
 /* Natural loop functions
-   Copyright (C) 1987-2014 Free Software Foundation, Inc.
+   Copyright (C) 1987-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,18 +20,6 @@ along with GCC; see the file COPYING3.  If not see
 #ifndef GCC_CFGLOOP_H
 #define GCC_CFGLOOP_H
 
-#include "double-int.h"
-#include "wide-int.h"
-#include "bitmap.h"
-#include "sbitmap.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "tm.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
 #include "cfgloopmanip.h"
 
 /* Structure to hold decision about unrolling/peeling.  */
@@ -94,7 +82,7 @@ struct GTY ((for_user)) loop_exit {
   struct loop_exit *next_e;
 };
 
-struct loop_exit_hasher : ggc_hasher<loop_exit *>
+struct loop_exit_hasher : ggc_ptr_hash<loop_exit>
 {
   typedef edge compare_type;
 
@@ -114,6 +102,14 @@ enum loop_estimation
   /* Estimate is ready.  */
   EST_AVAILABLE,
   EST_LAST
+};
+
+/* The structure describing non-overflow control induction variable for
+   loop's exit edge.  */
+struct GTY ((chain_next ("%h.next"))) control_iv {
+  tree base;
+  tree step;
+  struct control_iv *next;
 };
 
 /* Structure to hold information for each natural loop.  */
@@ -203,6 +199,9 @@ struct GTY ((chain_next ("%h.next"))) loop {
   /* Upper bound on number of iterations of a loop.  */
   struct nb_iter_bound *bounds;
 
+  /* Non-overflow control ivs of a loop.  */
+  struct control_iv *control_ivs;
+
   /* Head of the cyclic list of the exits of the loop.  */
   struct loop_exit *exits;
 
@@ -276,7 +275,7 @@ extern bool flow_loop_nested_p	(const struct loop *, const struct loop *);
 extern bool flow_bb_inside_loop_p (const struct loop *, const_basic_block);
 extern struct loop * find_common_loop (struct loop *, struct loop *);
 struct loop *superloop_at_depth (struct loop *, unsigned);
-struct eni_weights_d;
+struct eni_weights;
 extern int num_loop_insns (const struct loop *);
 extern int average_num_loop_insns (const struct loop *);
 extern unsigned get_loop_level (const struct loop *);
@@ -355,10 +354,10 @@ struct rtx_iv
   rtx delta, mult;
 
   /* The mode it is extended to.  */
-  enum machine_mode extend_mode;
+  machine_mode extend_mode;
 
   /* The mode the variable iterates in.  */
-  enum machine_mode mode;
+  machine_mode mode;
 
   /* Whether the first iteration needs to be handled specially.  */
   unsigned first_special : 1;
@@ -399,7 +398,7 @@ struct GTY(()) niter_desc
   bool signed_p;
 
   /* The mode in that niter_expr should be computed.  */
-  enum machine_mode mode;
+  machine_mode mode;
 
   /* The number of iterations of the loop.  */
   rtx niter_expr;
@@ -408,7 +407,7 @@ struct GTY(()) niter_desc
 extern void iv_analysis_loop_init (struct loop *);
 extern bool iv_analyze (rtx_insn *, rtx, struct rtx_iv *);
 extern bool iv_analyze_result (rtx_insn *, rtx, struct rtx_iv *);
-extern bool iv_analyze_expr (rtx_insn *, rtx, enum machine_mode,
+extern bool iv_analyze_expr (rtx_insn *, rtx, machine_mode,
 			     struct rtx_iv *);
 extern rtx get_iv_value (struct rtx_iv *, rtx);
 extern bool biv_p (rtx_insn *, rtx);

@@ -1,5 +1,5 @@
 /* Register renaming for the GNU compiler.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -20,27 +20,20 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "rtl.h"
+#include "df.h"
 #include "rtl-error.h"
 #include "tm_p.h"
 #include "insn-config.h"
 #include "regs.h"
 #include "addresses.h"
-#include "hard-reg-set.h"
-#include "basic-block.h"
+#include "cfganal.h"
 #include "reload.h"
 #include "output.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
 #include "recog.h"
 #include "flags.h"
-#include "obstack.h"
 #include "tree-pass.h"
-#include "df.h"
 #include "target.h"
 #include "emit-rtl.h"
 #include "regrename.h"
@@ -311,7 +304,7 @@ static bool
 check_new_reg_p (int reg ATTRIBUTE_UNUSED, int new_reg,
 		 struct du_head *this_head, HARD_REG_SET this_unavailable)
 {
-  enum machine_mode mode = GET_MODE (*this_head->first->loc);
+  machine_mode mode = GET_MODE (*this_head->first->loc);
   int nregs = hard_regno_nregs[new_reg][mode];
   int i;
   struct du_chain *tmp;
@@ -329,10 +322,7 @@ check_new_reg_p (int reg ATTRIBUTE_UNUSED, int new_reg,
 	|| (crtl->is_leaf
 	    && !LEAF_REGISTERS[new_reg + i])
 #endif
-#ifdef HARD_REGNO_RENAME_OK
-	|| ! HARD_REGNO_RENAME_OK (reg + i, new_reg + i)
-#endif
-	)
+	|| ! HARD_REGNO_RENAME_OK (reg + i, new_reg + i))
       return false;
 
   /* See whether it accepts all modes that occur in
@@ -353,11 +343,13 @@ check_new_reg_p (int reg ATTRIBUTE_UNUSED, int new_reg,
 /* For the chain THIS_HEAD, compute and return the best register to
    rename to.  SUPER_CLASS is the superunion of register classes in
    the chain.  UNAVAILABLE is a set of registers that cannot be used.
-   OLD_REG is the register currently used for the chain.  */
+   OLD_REG is the register currently used for the chain.  BEST_RENAME
+   controls whether the register chosen must be better than the
+   current one or just respect the given constraint.  */
 
 int
-find_best_rename_reg (du_head_p this_head, enum reg_class super_class,
-		      HARD_REG_SET *unavailable, int old_reg)
+find_rename_reg (du_head_p this_head, enum reg_class super_class,
+		 HARD_REG_SET *unavailable, int old_reg, bool best_rename)
 {
   bool has_preferred_class;
   enum reg_class preferred_class;
@@ -396,15 +388,19 @@ find_best_rename_reg (du_head_p this_head, enum reg_class super_class,
 				    new_reg))
 	    continue;
 
+	  if (!check_new_reg_p (old_reg, new_reg, this_head, *unavailable))
+	    continue;
+
+	  if (!best_rename)
+	    return new_reg;
+
 	  /* In the first pass, we force the renaming of registers that
 	     don't belong to PREFERRED_CLASS to registers that do, even
 	     though the latters were used not very long ago.  */
-	  if (check_new_reg_p (old_reg, new_reg, this_head,
-			       *unavailable)
-	      && ((pass == 0
-		   && !TEST_HARD_REG_BIT (reg_class_contents[preferred_class],
-					  best_new_reg))
-		  || tick[best_new_reg] > tick[new_reg]))
+	  if ((pass == 0
+	      && !TEST_HARD_REG_BIT (reg_class_contents[preferred_class],
+				     best_new_reg))
+	      || tick[best_new_reg] > tick[new_reg])
 	    best_new_reg = new_reg;
 	}
       if (pass == 0 && best_new_reg != old_reg)
@@ -428,9 +424,8 @@ rename_chains (void)
   if (frame_pointer_needed)
     {
       add_to_hard_reg_set (&unavailable, Pmode, FRAME_POINTER_REGNUM);
-#if !HARD_FRAME_POINTER_IS_FRAME_POINTER
-      add_to_hard_reg_set (&unavailable, Pmode, HARD_FRAME_POINTER_REGNUM);
-#endif
+      if (!HARD_FRAME_POINTER_IS_FRAME_POINTER)
+	add_to_hard_reg_set (&unavailable, Pmode, HARD_FRAME_POINTER_REGNUM);
     }
 
   FOR_EACH_VEC_ELT (id_to_chain, i, this_head)
@@ -446,12 +441,10 @@ rename_chains (void)
 	continue;
 
       if (fixed_regs[reg] || global_regs[reg]
-#if !HARD_FRAME_POINTER_IS_FRAME_POINTER
-	  || (frame_pointer_needed && reg == HARD_FRAME_POINTER_REGNUM)
-#else
-	  || (frame_pointer_needed && reg == FRAME_POINTER_REGNUM)
-#endif
-	  )
+	  || (!HARD_FRAME_POINTER_IS_FRAME_POINTER && frame_pointer_needed
+	      && reg == HARD_FRAME_POINTER_REGNUM)
+	  || (HARD_FRAME_POINTER_REGNUM && frame_pointer_needed
+	      && reg == FRAME_POINTER_REGNUM))
 	continue;
 
       COPY_HARD_REG_SET (this_unavailable, unavailable);
@@ -476,8 +469,8 @@ rename_chains (void)
       if (n_uses < 2)
 	continue;
 
-      best_new_reg = find_best_rename_reg (this_head, super_class,
-					   &this_unavailable, reg);
+      best_new_reg = find_rename_reg (this_head, super_class,
+				      &this_unavailable, reg, true);
 
       if (dump_file)
 	{
@@ -495,12 +488,20 @@ rename_chains (void)
 	  continue;
 	}
 
-      if (dump_file)
-	fprintf (dump_file, ", renamed as %s\n", reg_names[best_new_reg]);
-
-      regrename_do_replace (this_head, best_new_reg);
-      tick[best_new_reg] = ++this_tick;
-      df_set_regs_ever_live (best_new_reg, true);
+      if (regrename_do_replace (this_head, best_new_reg))
+	{
+	  if (dump_file)
+	    fprintf (dump_file, ", renamed as %s\n", reg_names[best_new_reg]);
+	  tick[best_new_reg] = ++this_tick;
+	  df_set_regs_ever_live (best_new_reg, true);
+	}
+      else
+	{
+	  if (dump_file)
+	    fprintf (dump_file, ", renaming as %s failed\n",
+		     reg_names[best_new_reg]);
+	  tick[reg] = ++this_tick;
+	}
     }
 }
 
@@ -926,12 +927,18 @@ regrename_analyze (bitmap bb_mask)
     bb->aux = NULL;
 }
 
-void
+/* Attempt to replace all uses of the register in the chain beginning with
+   HEAD with REG.  Returns true on success and false if the replacement is
+   rejected because the insns would not validate.  The latter can happen
+   e.g. if a match_parallel predicate enforces restrictions on register
+   numbering in its subpatterns.  */
+
+bool
 regrename_do_replace (struct du_head *head, int reg)
 {
   struct du_chain *chain;
   unsigned int base_regno = head->regno;
-  enum machine_mode mode;
+  machine_mode mode;
 
   for (chain = head->first; chain; chain = chain->next_use)
     {
@@ -940,22 +947,26 @@ regrename_do_replace (struct du_head *head, int reg)
       int reg_ptr = REG_POINTER (*chain->loc);
 
       if (DEBUG_INSN_P (chain->insn) && REGNO (*chain->loc) != base_regno)
-	INSN_VAR_LOCATION_LOC (chain->insn) = gen_rtx_UNKNOWN_VAR_LOC ();
+	validate_change (chain->insn, &(INSN_VAR_LOCATION_LOC (chain->insn)),
+			 gen_rtx_UNKNOWN_VAR_LOC (), true);
       else
 	{
-	  *chain->loc = gen_raw_REG (GET_MODE (*chain->loc), reg);
+	  validate_change (chain->insn, chain->loc, 
+			   gen_raw_REG (GET_MODE (*chain->loc), reg), true);
 	  if (regno >= FIRST_PSEUDO_REGISTER)
 	    ORIGINAL_REGNO (*chain->loc) = regno;
 	  REG_ATTRS (*chain->loc) = attr;
 	  REG_POINTER (*chain->loc) = reg_ptr;
 	}
-
-      df_insn_rescan (chain->insn);
     }
+
+  if (!apply_change_group ())
+    return false;
 
   mode = GET_MODE (*head->first->loc);
   head->regno = reg;
   head->nregs = hard_regno_nregs[reg][mode];
+  return true;
 }
 
 
@@ -977,7 +988,7 @@ verify_reg_in_set (rtx op, HARD_REG_SET *pset)
     return false;
 
   regno = REGNO (op);
-  nregs = hard_regno_nregs[regno][GET_MODE (op)];
+  nregs = REG_NREGS (op);
   all_live = all_dead = true;
   while (nregs-- > 0)
     if (TEST_HARD_REG_BIT (*pset, regno + nregs))
@@ -1030,9 +1041,8 @@ scan_rtx_reg (rtx_insn *insn, rtx *loc, enum reg_class cl, enum scan_actions act
 {
   struct du_head **p;
   rtx x = *loc;
-  enum machine_mode mode = GET_MODE (x);
   unsigned this_regno = REGNO (x);
-  int this_nregs = hard_regno_nregs[this_regno][mode];
+  int this_nregs = REG_NREGS (x);
 
   if (action == mark_write)
     {
@@ -1181,7 +1191,7 @@ scan_rtx_reg (rtx_insn *insn, rtx *loc, enum reg_class cl, enum scan_actions act
 
 static void
 scan_rtx_address (rtx_insn *insn, rtx *loc, enum reg_class cl,
-		  enum scan_actions action, enum machine_mode mode,
+		  enum scan_actions action, machine_mode mode,
 		  addr_space_t as)
 {
   rtx x = *loc;
@@ -1296,11 +1306,11 @@ scan_rtx_address (rtx_insn *insn, rtx *loc, enum reg_class cl,
     case PRE_INC:
     case PRE_DEC:
     case PRE_MODIFY:
-#ifndef AUTO_INC_DEC
       /* If the target doesn't claim to handle autoinc, this must be
 	 something special, like a stack push.  Kill this chain.  */
+    if (!AUTO_INC_DEC)
       action = mark_all_read;
-#endif
+
       break;
 
     case MEM:
@@ -1618,13 +1628,8 @@ build_def_use (basic_block bb)
 		  && !(untracked_operands & (1 << i))
 		  && REG_P (op)
 		  && !verify_reg_tracked (op))
-		{
-		  enum machine_mode mode = GET_MODE (op);
-		  unsigned this_regno = REGNO (op);
-		  unsigned this_nregs = hard_regno_nregs[this_regno][mode];
-		  create_new_chain (this_regno, this_nregs, NULL, NULL,
-				    NO_REGS);
-		}
+		create_new_chain (REGNO (op), REG_NREGS (op), NULL, NULL,
+				  NO_REGS);
 	    }
 
 	  if (fail_current_block)

@@ -1,5 +1,5 @@
 /* Header file for gimple decl, type and expressions.
-   Copyright (C) 2013-2014 Free Software Foundation, Inc.
+   Copyright (C) 2013-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -28,11 +28,10 @@ extern gimple_seq gimple_body (tree);
 extern bool gimple_has_body_p (tree);
 extern const char *gimple_decl_printable_name (tree, int);
 extern tree copy_var_decl (tree, tree, tree);
-extern bool gimple_can_coalesce_p (tree, tree);
 extern tree create_tmp_var_name (const char *);
-extern tree create_tmp_var_raw (tree, const char *);
-extern tree create_tmp_var (tree, const char *);
-extern tree create_tmp_reg (tree, const char *);
+extern tree create_tmp_var_raw (tree, const char * = NULL);
+extern tree create_tmp_var (tree, const char * = NULL);
+extern tree create_tmp_reg (tree, const char * = NULL);
 extern tree create_tmp_reg_fn (struct function *, tree, const char *);
 
 
@@ -136,9 +135,9 @@ is_gimple_constant (const_tree t)
     case INTEGER_CST:
     case REAL_CST:
     case FIXED_CST:
-    case STRING_CST:
     case COMPLEX_CST:
     case VECTOR_CST:
+    case STRING_CST:
       return true;
 
     default:

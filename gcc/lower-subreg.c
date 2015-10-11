@@ -1,5 +1,5 @@
 /* Decompose multiword subregs.
-   Copyright (C) 2007-2014 Free Software Foundation, Inc.
+   Copyright (C) 2007-2015 Free Software Foundation, Inc.
    Contributed by Richard Henderson <rth@redhat.com>
 		  Ian Lance Taylor <iant@google.com>
 
@@ -22,32 +22,32 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "machmode.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
 #include "rtl.h"
+#include "df.h"
+#include "alias.h"
 #include "tm_p.h"
 #include "flags.h"
 #include "insn-config.h"
-#include "obstack.h"
-#include "basic-block.h"
+#include "cfgrtl.h"
+#include "cfgbuild.h"
 #include "recog.h"
-#include "bitmap.h"
 #include "dce.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
 #include "except.h"
 #include "regs.h"
 #include "tree-pass.h"
-#include "df.h"
 #include "lower-subreg.h"
 #include "rtl-iter.h"
-
-#ifdef STACK_GROWS_DOWNWARD
-# undef STACK_GROWS_DOWNWARD
-# define STACK_GROWS_DOWNWARD 1
-#else
-# define STACK_GROWS_DOWNWARD 0
-#endif
 
 
 /* Decompose multi-word pseudo-registers into individual
@@ -131,13 +131,13 @@ struct cost_rtxes {
 
 static int
 shift_cost (bool speed_p, struct cost_rtxes *rtxes, enum rtx_code code,
-	    enum machine_mode mode, int op1)
+	    machine_mode mode, int op1)
 {
   PUT_CODE (rtxes->shift, code);
   PUT_MODE (rtxes->shift, mode);
   PUT_MODE (rtxes->source, mode);
   XEXP (rtxes->shift, 1) = GEN_INT (op1);
-  return set_src_cost (rtxes->shift, speed_p);
+  return set_src_cost (rtxes->shift, mode, speed_p);
 }
 
 /* For each X in the range [0, BITS_PER_WORD), set SPLITTING[X]
@@ -205,7 +205,7 @@ compute_costs (bool speed_p, struct cost_rtxes *rtxes)
 
   for (i = 0; i < MAX_MACHINE_MODE; i++)
     {
-      enum machine_mode mode = (enum machine_mode) i;
+      machine_mode mode = (machine_mode) i;
       int factor = GET_MODE_SIZE (mode) / UNITS_PER_WORD;
       if (factor > 1)
 	{
@@ -241,7 +241,7 @@ compute_costs (bool speed_p, struct cost_rtxes *rtxes)
       /* The only case here to check to see if moving the upper part with a
 	 zero is cheaper than doing the zext itself.  */
       PUT_MODE (rtxes->source, word_mode);
-      zext_cost = set_src_cost (rtxes->zext, speed_p);
+      zext_cost = set_src_cost (rtxes->zext, twice_word_mode, speed_p);
 
       if (LOG_COSTS)
 	fprintf (stderr, "%s %s: original cost %d, split cost %d + %d\n",
@@ -276,9 +276,9 @@ init_lower_subreg (void)
 
   twice_word_mode = GET_MODE_2XWIDER_MODE (word_mode);
 
-  rtxes.target = gen_rtx_REG (word_mode, FIRST_PSEUDO_REGISTER);
-  rtxes.source = gen_rtx_REG (word_mode, FIRST_PSEUDO_REGISTER + 1);
-  rtxes.set = gen_rtx_SET (VOIDmode, rtxes.target, rtxes.source);
+  rtxes.target = gen_rtx_REG (word_mode, LAST_VIRTUAL_REGISTER + 1);
+  rtxes.source = gen_rtx_REG (word_mode, LAST_VIRTUAL_REGISTER + 2);
+  rtxes.set = gen_rtx_SET (rtxes.target, rtxes.source);
   rtxes.zext = gen_rtx_ZERO_EXTEND (twice_word_mode, rtxes.source);
   rtxes.shift = gen_rtx_ASHIFT (twice_word_mode, rtxes.source, const0_rtx);
 
@@ -326,7 +326,7 @@ simple_move (rtx_insn *insn, bool speed_p)
 {
   rtx x;
   rtx set;
-  enum machine_mode mode;
+  machine_mode mode;
 
   if (recog_data.n_operands != 2)
     return NULL_RTX;
@@ -610,11 +610,11 @@ decompose_register (unsigned int regno)
 /* Get a SUBREG of a CONCATN.  */
 
 static rtx
-simplify_subreg_concatn (enum machine_mode outermode, rtx op,
+simplify_subreg_concatn (machine_mode outermode, rtx op,
 			 unsigned int byte)
 {
   unsigned int inner_size;
-  enum machine_mode innermode, partmode;
+  machine_mode innermode, partmode;
   rtx part;
   unsigned int final_offset;
 
@@ -650,8 +650,8 @@ simplify_subreg_concatn (enum machine_mode outermode, rtx op,
 /* Wrapper around simplify_gen_subreg which handles CONCATN.  */
 
 static rtx
-simplify_gen_subreg_concatn (enum machine_mode outermode, rtx op,
-			     enum machine_mode innermode, unsigned int byte)
+simplify_gen_subreg_concatn (machine_mode outermode, rtx op,
+			     machine_mode innermode, unsigned int byte)
 {
   rtx ret;
 
@@ -845,7 +845,7 @@ resolve_simple_move (rtx set, rtx_insn *insn)
 {
   rtx src, dest, real_dest;
   rtx_insn *insns;
-  enum machine_mode orig_mode, dest_mode;
+  machine_mode orig_mode, dest_mode;
   unsigned int words;
   bool pushing;
 
@@ -940,19 +940,19 @@ resolve_simple_move (rtx set, rtx_insn *insn)
 
       reg = gen_reg_rtx (orig_mode);
 
-#ifdef AUTO_INC_DEC
-      {
-	rtx move = emit_move_insn (reg, src);
-	if (MEM_P (src))
-	  {
-	    rtx note = find_reg_note (insn, REG_INC, NULL_RTX);
-	    if (note)
-	      add_reg_note (move, REG_INC, XEXP (note, 0));
-	  }
-      }
-#else
-      emit_move_insn (reg, src);
-#endif
+      if (AUTO_INC_DEC)
+	{
+	  rtx move = emit_move_insn (reg, src);
+	  if (MEM_P (src))
+	    {
+	      rtx note = find_reg_note (insn, REG_INC, NULL_RTX);
+	      if (note)
+		add_reg_note (move, REG_INC, XEXP (note, 0));
+	    }
+	}
+      else
+	emit_move_insn (reg, src);
+
       src = reg;
     }
 
@@ -1043,15 +1043,13 @@ resolve_simple_move (rtx set, rtx_insn *insn)
 	mdest = simplify_gen_subreg (orig_mode, dest, GET_MODE (dest), 0);
       minsn = emit_move_insn (real_dest, mdest);
 
-#ifdef AUTO_INC_DEC
-  if (MEM_P (real_dest)
+  if (AUTO_INC_DEC && MEM_P (real_dest)
       && !(resolve_reg_p (real_dest) || resolve_subreg_p (real_dest)))
     {
       rtx note = find_reg_note (insn, REG_INC, NULL_RTX);
       if (note)
 	add_reg_note (minsn, REG_INC, XEXP (note, 0));
     }
-#endif
 
       smove = single_set (minsn);
       gcc_assert (smove != NULL_RTX);
@@ -1084,7 +1082,7 @@ static bool
 resolve_clobber (rtx pat, rtx_insn *insn)
 {
   rtx reg;
-  enum machine_mode orig_mode;
+  machine_mode orig_mode;
   unsigned int words, i;
   int ret;
 
@@ -1361,12 +1359,12 @@ dump_choices (bool speed_p, const char *description)
   fprintf (dump_file, "Choices when optimizing for %s:\n", description);
 
   for (i = 0; i < MAX_MACHINE_MODE; i++)
-    if (GET_MODE_SIZE ((enum machine_mode) i) > UNITS_PER_WORD)
+    if (GET_MODE_SIZE ((machine_mode) i) > UNITS_PER_WORD)
       fprintf (dump_file, "  %s mode %s for copy lowering.\n",
 	       choices[speed_p].move_modes_to_split[i]
 	       ? "Splitting"
 	       : "Skipping",
-	       GET_MODE_NAME ((enum machine_mode) i));
+	       GET_MODE_NAME ((machine_mode) i));
 
   fprintf (dump_file, "  %s mode %s for zero_extend lowering.\n",
 	   choices[speed_p].splitting_zext ? "Splitting" : "Skipping",
@@ -1416,7 +1414,7 @@ decompose_multiword_subregs (bool decompose_copies)
     for (i = FIRST_PSEUDO_REGISTER; i < max; ++i)
       if (regno_reg_rtx[i] != NULL)
 	{
-	  enum machine_mode mode = GET_MODE (regno_reg_rtx[i]);
+	  machine_mode mode = GET_MODE (regno_reg_rtx[i]);
 	  if (choices[false].move_modes_to_split[(int) mode]
 	      || choices[true].move_modes_to_split[(int) mode])
 	    {

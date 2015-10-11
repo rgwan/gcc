@@ -1,4 +1,4 @@
-/* Copyright (C) 2008-2014 Free Software Foundation, Inc.
+/* Copyright (C) 2008-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,6 +20,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "version.h"
 #include "flags.h"
@@ -138,7 +139,7 @@ static void scan_translation_unit_trad (cpp_reader *);
 
 /* Callback routines for the parser. Most of these are active only
    in specific modes.  */
-static void cb_file_change (cpp_reader *, const struct line_map *);
+static void cb_file_change (cpp_reader *, const line_map_ordinary *);
 static void cb_line_change (cpp_reader *, const cpp_token *, int);
 static void cb_define (cpp_reader *, source_location, cpp_hashnode *);
 static void cb_undef (cpp_reader *, source_location, cpp_hashnode *);
@@ -170,7 +171,10 @@ cpp_define_builtins (cpp_reader *pfile)
   cpp_define (pfile, "__GFORTRAN__=1");
   cpp_define (pfile, "_LANGUAGE_FORTRAN=1");
 
-  if (gfc_option.gfc_flag_openmp)
+  if (flag_openacc)
+    cpp_define (pfile, "_OPENACC=201306");
+
+  if (flag_openmp)
     cpp_define (pfile, "_OPENMP=201307");
 
   /* The defines below are necessary for the TARGET_* macros.
@@ -450,7 +454,7 @@ gfc_cpp_post_options (void)
 	  || gfc_cpp_option.no_line_commands
 	  || gfc_cpp_option.dump_macros
 	  || gfc_cpp_option.dump_includes))
-    gfc_fatal_error("To enable preprocessing, use -cpp");
+    gfc_fatal_error ("To enable preprocessing, use %<-cpp%>");
 
   if (!gfc_cpp_enabled ())
     return;
@@ -470,7 +474,7 @@ gfc_cpp_post_options (void)
 
   cpp_option->cpp_pedantic = pedantic;
 
-  cpp_option->dollars_in_ident = gfc_option.flag_dollar_ok;
+  cpp_option->dollars_in_ident = flag_dollar_ok;
   cpp_option->discard_comments = gfc_cpp_option.discard_comments;
   cpp_option->discard_comments_in_macro_exp = gfc_cpp_option.discard_comments_in_macro_exp;
   cpp_option->print_include_names = gfc_cpp_option.print_include_names;
@@ -548,7 +552,7 @@ gfc_cpp_init_0 (void)
 
 	  print.outf = fopen (gfc_cpp_option.output_filename, "w");
 	  if (print.outf == NULL)
-	    gfc_fatal_error ("opening output file %s: %s",
+	    gfc_fatal_error ("opening output file %qs: %s",
 			     gfc_cpp_option.output_filename,
 			     xstrerror (errno));
 	}
@@ -559,7 +563,7 @@ gfc_cpp_init_0 (void)
     {
       print.outf = fopen (gfc_cpp_option.temporary_filename, "w");
       if (print.outf == NULL)
-	gfc_fatal_error ("opening output file %s: %s",
+	gfc_fatal_error ("opening output file %qs: %s",
 			 gfc_cpp_option.temporary_filename, xstrerror (errno));
     }
 
@@ -666,7 +670,7 @@ gfc_cpp_done (void)
 	      fclose (f);
 	    }
 	  else
-	    gfc_fatal_error ("opening output file %s: %s",
+	    gfc_fatal_error ("opening output file %qs: %s",
 			     gfc_cpp_option.deps_filename,
 			     xstrerror (errno));
 	}
@@ -795,7 +799,8 @@ scan_translation_unit_trad (cpp_reader *pfile)
 static void
 maybe_print_line (source_location src_loc)
 {
-  const struct line_map *map = linemap_lookup (line_table, src_loc);
+  const line_map_ordinary *map
+    = linemap_check_ordinary (linemap_lookup (line_table, src_loc));
   int src_line = SOURCE_LINE (map, src_loc);
 
   /* End the previous line of text.  */
@@ -862,7 +867,7 @@ print_line (source_location src_loc, const char *special_flags)
 }
 
 static void
-cb_file_change (cpp_reader * ARG_UNUSED (pfile), const struct line_map *map)
+cb_file_change (cpp_reader * ARG_UNUSED (pfile), const line_map_ordinary *map)
 {
   const char *flags = "";
 
@@ -884,7 +889,7 @@ cb_file_change (cpp_reader * ARG_UNUSED (pfile), const struct line_map *map)
 	  /* Bring current file to correct line when entering a new file.  */
 	  if (map->reason == LC_ENTER)
 	    {
-	      const struct line_map *from = INCLUDED_FROM (line_table, map);
+	      const line_map_ordinary *from = INCLUDED_FROM (line_table, map);
 	      maybe_print_line (LAST_SOURCE_LINE_LOCATION (from));
 	    }
 	  if (map->reason == LC_ENTER)
@@ -918,7 +923,8 @@ cb_line_change (cpp_reader *pfile, const cpp_token *token,
      ought to care.  Some things do care; the fault lies with them.  */
   if (!CPP_OPTION (pfile, traditional))
     {
-      const struct line_map *map = linemap_lookup (line_table, src_loc);
+      const line_map_ordinary *map
+	= linemap_check_ordinary (linemap_lookup (line_table, src_loc));
       int spaces = SOURCE_COLUMN (map, src_loc) - 2;
       print.printed = 1;
 

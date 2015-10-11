@@ -1,5 +1,5 @@
 /* Loop distribution.
-   Copyright (C) 2006-2014 Free Software Foundation, Inc.
+   Copyright (C) 2006-2015 Free Software Foundation, Inc.
    Contributed by Georges-Andre Silber <Georges-Andre.Silber@ensmp.fr>
    and Sebastian Pop <sebastian.pop@amd.com>.
 
@@ -44,22 +44,21 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "alias.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
 #include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "options.h"
+#include "fold-const.h"
+#include "cfganal.h"
+#include "internal-fn.h"
 #include "gimple-iterator.h"
 #include "gimplify-me.h"
 #include "stor-layout.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-ssa-loop-manip.h"
 #include "tree-ssa-loop.h"
 #include "tree-into-ssa.h"
@@ -393,16 +392,16 @@ stmts_from_loop (struct loop *loop, vec<gimple> *stmts)
   for (i = 0; i < loop->num_nodes; i++)
     {
       basic_block bb = bbs[i];
-      gimple_stmt_iterator bsi;
-      gimple stmt;
 
-      for (bsi = gsi_start_phis (bb); !gsi_end_p (bsi); gsi_next (&bsi))
-	if (!virtual_operand_p (gimple_phi_result (gsi_stmt (bsi))))
-	  stmts->safe_push (gsi_stmt (bsi));
+      for (gphi_iterator bsi = gsi_start_phis (bb); !gsi_end_p (bsi);
+	   gsi_next (&bsi))
+	if (!virtual_operand_p (gimple_phi_result (bsi.phi ())))
+	  stmts->safe_push (bsi.phi ());
 
-      for (bsi = gsi_start_bb (bb); !gsi_end_p (bsi); gsi_next (&bsi))
+      for (gimple_stmt_iterator bsi = gsi_start_bb (bb); !gsi_end_p (bsi);
+	   gsi_next (&bsi))
 	{
-	  stmt = gsi_stmt (bsi);
+	  gimple stmt = gsi_stmt (bsi);
 	  if (gimple_code (stmt) != GIMPLE_LABEL && !is_gimple_debug (stmt))
 	    stmts->safe_push (stmt);
 	}
@@ -620,7 +619,6 @@ generate_loops_for_partition (struct loop *loop, partition_t partition,
 			      bool copy_p)
 {
   unsigned i;
-  gimple_stmt_iterator bsi;
   basic_block *bbs;
 
   if (copy_p)
@@ -639,15 +637,16 @@ generate_loops_for_partition (struct loop *loop, partition_t partition,
       {
 	basic_block bb = bbs[i];
 
-	for (bsi = gsi_start_phis (bb); !gsi_end_p (bsi); gsi_next (&bsi))
+	for (gphi_iterator bsi = gsi_start_phis (bb); !gsi_end_p (bsi);
+	     gsi_next (&bsi))
 	  {
-	    gimple phi = gsi_stmt (bsi);
+	    gphi *phi = bsi.phi ();
 	    if (!virtual_operand_p (gimple_phi_result (phi))
 		&& !bitmap_bit_p (partition->stmts, gimple_uid (phi)))
 	      reset_debug_uses (phi);
 	  }
 
-	for (bsi = gsi_start_bb (bb); !gsi_end_p (bsi); gsi_next (&bsi))
+	for (gimple_stmt_iterator bsi = gsi_start_bb (bb); !gsi_end_p (bsi); gsi_next (&bsi))
 	  {
 	    gimple stmt = gsi_stmt (bsi);
 	    if (gimple_code (stmt) != GIMPLE_LABEL
@@ -661,9 +660,9 @@ generate_loops_for_partition (struct loop *loop, partition_t partition,
     {
       basic_block bb = bbs[i];
 
-      for (bsi = gsi_start_phis (bb); !gsi_end_p (bsi);)
+      for (gphi_iterator bsi = gsi_start_phis (bb); !gsi_end_p (bsi);)
 	{
-	  gimple phi = gsi_stmt (bsi);
+	  gphi *phi = bsi.phi ();
 	  if (!virtual_operand_p (gimple_phi_result (phi))
 	      && !bitmap_bit_p (partition->stmts, gimple_uid (phi)))
 	    remove_phi_node (&bsi, true);
@@ -671,7 +670,7 @@ generate_loops_for_partition (struct loop *loop, partition_t partition,
 	    gsi_next (&bsi);
 	}
 
-      for (bsi = gsi_start_bb (bb); !gsi_end_p (bsi);)
+      for (gimple_stmt_iterator bsi = gsi_start_bb (bb); !gsi_end_p (bsi);)
 	{
 	  gimple stmt = gsi_stmt (bsi);
 	  if (gimple_code (stmt) != GIMPLE_LABEL
@@ -680,15 +679,16 @@ generate_loops_for_partition (struct loop *loop, partition_t partition,
 	    {
 	      /* Choose an arbitrary path through the empty CFG part
 		 that this unnecessary control stmt controls.  */
-	      if (gimple_code (stmt) == GIMPLE_COND)
+	      if (gcond *cond_stmt = dyn_cast <gcond *> (stmt))
 		{
-		  gimple_cond_make_false (stmt);
+		  gimple_cond_make_false (cond_stmt);
 		  update_stmt (stmt);
 		}
 	      else if (gimple_code (stmt) == GIMPLE_SWITCH)
 		{
+		  gswitch *switch_stmt = as_a <gswitch *> (stmt);
 		  gimple_switch_set_index
-		      (stmt, CASE_LOW (gimple_switch_label (stmt, 1)));
+		      (switch_stmt, CASE_LOW (gimple_switch_label (switch_stmt, 1)));
 		  update_stmt (stmt);
 		}
 	      else
@@ -809,9 +809,8 @@ generate_memset_builtin (struct loop *loop, partition_t partition)
     val = fold_convert (integer_type_node, val);
   else if (!useless_type_conversion_p (integer_type_node, TREE_TYPE (val)))
     {
-      gimple cstmt;
-      tree tem = make_ssa_name (integer_type_node, NULL);
-      cstmt = gimple_build_assign_with_ops (NOP_EXPR, tem, val, NULL_TREE);
+      tree tem = make_ssa_name (integer_type_node);
+      gimple cstmt = gimple_build_assign (tem, NOP_EXPR, val);
       gsi_insert_after (&gsi, cstmt, GSI_CONTINUE_LINKING);
       val = tem;
     }
@@ -901,14 +900,15 @@ destroy_loop (struct loop *loop)
 	 Make sure we replace all uses of virtual defs that will remain
 	 outside of the loop with the bare symbol as delete_basic_block
 	 will release them.  */
-      gimple_stmt_iterator gsi;
-      for (gsi = gsi_start_phis (bbs[i]); !gsi_end_p (gsi); gsi_next (&gsi))
+      for (gphi_iterator gsi = gsi_start_phis (bbs[i]); !gsi_end_p (gsi);
+	   gsi_next (&gsi))
 	{
-	  gimple phi = gsi_stmt (gsi);
+	  gphi *phi = gsi.phi ();
 	  if (virtual_operand_p (gimple_phi_result (phi)))
 	    mark_virtual_phi_result_for_renaming (phi);
 	}
-      for (gsi = gsi_start_bb (bbs[i]); !gsi_end_p (gsi); gsi_next (&gsi))
+      for (gimple_stmt_iterator gsi = gsi_start_bb (bbs[i]); !gsi_end_p (gsi);
+	   gsi_next (&gsi))
 	{
 	  gimple stmt = gsi_stmt (gsi);
 	  tree vdef = gimple_vdef (stmt);
@@ -1342,15 +1342,14 @@ pg_add_dependence_edges (struct graph *rdg, vec<loop_p> loops, int dir,
   for (int ii = 0; drs1.iterate (ii, &dr1); ++ii)
     for (int jj = 0; drs2.iterate (jj, &dr2); ++jj)
       {
+	data_reference_p saved_dr1 = dr1;
 	int this_dir = 1;
 	ddr_p ddr;
 	/* Re-shuffle data-refs to be in dominator order.  */
 	if (rdg_vertex_for_stmt (rdg, DR_STMT (dr1))
 	    > rdg_vertex_for_stmt (rdg, DR_STMT (dr2)))
 	  {
-	    data_reference_p tem = dr1;
-	    dr1 = dr2;
-	    dr2 = tem;
+	    std::swap (dr1, dr2);
 	    this_dir = -this_dir;
 	  }
 	ddr = initialize_data_dependence_relation (dr1, dr2, loops);
@@ -1361,9 +1360,7 @@ pg_add_dependence_edges (struct graph *rdg, vec<loop_p> loops, int dir,
 	  {
 	    if (DDR_REVERSED_P (ddr))
 	      {
-		data_reference_p tem = dr1;
-		dr1 = dr2;
-		dr2 = tem;
+		std::swap (dr1, dr2);
 		this_dir = -this_dir;
 	      }
 	    /* Known dependences can still be unordered througout the
@@ -1387,6 +1384,8 @@ pg_add_dependence_edges (struct graph *rdg, vec<loop_p> loops, int dir,
 	  dir = this_dir;
 	else if (dir != this_dir)
 	  return 2;
+	/* Shuffle "back" dr1.  */
+	dr1 = saved_dr1;
       }
   return dir;
 }
@@ -1741,10 +1740,11 @@ pass_loop_distribution::execute (function *fun)
       bbs = get_loop_body_in_dom_order (loop);
       for (i = 0; i < loop->num_nodes; ++i)
 	{
-	  gimple_stmt_iterator gsi;
-	  for (gsi = gsi_start_phis (bbs[i]); !gsi_end_p (gsi); gsi_next (&gsi))
+	  for (gphi_iterator gsi = gsi_start_phis (bbs[i]);
+	       !gsi_end_p (gsi);
+	       gsi_next (&gsi))
 	    {
-	      gimple phi = gsi_stmt (gsi);
+	      gphi *phi = gsi.phi ();
 	      if (virtual_operand_p (gimple_phi_result (phi)))
 		continue;
 	      /* Distribute stmts which have defs that are used outside of
@@ -1753,7 +1753,9 @@ pass_loop_distribution::execute (function *fun)
 		continue;
 	      work_list.safe_push (phi);
 	    }
-	  for (gsi = gsi_start_bb (bbs[i]); !gsi_end_p (gsi); gsi_next (&gsi))
+	  for (gimple_stmt_iterator gsi = gsi_start_bb (bbs[i]);
+	       !gsi_end_p (gsi);
+	       gsi_next (&gsi))
 	    {
 	      gimple stmt = gsi_stmt (gsi);
 
@@ -1812,6 +1814,9 @@ out:
 
   if (changed)
     {
+      /* Cached scalar evolutions now may refer to wrong or non-existing
+	 loops.  */
+      scev_reset_htab ();
       mark_virtual_operands_for_renaming (fun);
       rewrite_into_loop_closed_ssa (NULL, TODO_update_ssa);
     }

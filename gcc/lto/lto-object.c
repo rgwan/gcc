@@ -1,5 +1,5 @@
 /* LTO routines to use object files.
-   Copyright (C) 2010-2014 Free Software Foundation, Inc.
+   Copyright (C) 2010-2015 Free Software Foundation, Inc.
    Written by Ian Lance Taylor, Google.
 
 This file is part of GCC.
@@ -21,17 +21,20 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tree.h"
+#include "alias.h"
+#include "tm.h"
+#include "function.h"
+#include "predict.h"
 #include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
+#include "tree.h"
 #include "gimple.h"
+#include "hard-reg-set.h"
+#include "options.h"
+#include "fold-const.h"
+#include "internal-fn.h"
 #include "diagnostic-core.h"
 #include "lto.h"
-#include "tm.h"
-#include "lto-streamer.h"
+#include "cgraph.h"
 #include "lto-section-names.h"
 #include "simple-object.h"
 
@@ -189,9 +192,9 @@ lto_obj_file_close (lto_file *file)
       if (errmsg != NULL)
 	{
 	  if (err == 0)
-	    fatal_error ("%s", errmsg);
+	    fatal_error (input_location, "%s", errmsg);
 	  else
-	    fatal_error ("%s: %s", errmsg, xstrerror (err));
+	    fatal_error (input_location, "%s: %s", errmsg, xstrerror (err));
 	}
 
       simple_object_release_write (lo->sobj_w);
@@ -200,7 +203,7 @@ lto_obj_file_close (lto_file *file)
   if (lo->fd != -1)
     {
       if (close (lo->fd) < 0)
-	fatal_error ("close: %s", xstrerror (errno));
+	fatal_error (input_location, "close: %s", xstrerror (errno));
     }
 }
 
@@ -230,8 +233,7 @@ lto_obj_add_section (void *data, const char *name, off_t offset,
   void **slot;
   struct lto_section_list *list = loasd->list;
 
-  if (strncmp (name, LTO_SECTION_NAME_PREFIX,
-	       strlen (LTO_SECTION_NAME_PREFIX)) != 0)
+  if (strncmp (name, section_name_prefix, strlen (section_name_prefix)))
     return 1;
 
   new_name = xstrdup (name);
@@ -344,9 +346,9 @@ lto_obj_begin_section (const char *name)
   if (lo->section == NULL)
     {
       if (err == 0)
-	fatal_error ("%s", errmsg);
+	fatal_error (input_location, "%s", errmsg);
       else
-	fatal_error ("%s: %s", errmsg, xstrerror (errno));
+	fatal_error (input_location, "%s: %s", errmsg, xstrerror (errno));
     }
 }
 
@@ -368,9 +370,9 @@ lto_obj_append_data (const void *data, size_t len, void *)
   if (errmsg != NULL)
     {
       if (err == 0)
-	fatal_error ("%s", errmsg);
+	fatal_error (input_location, "%s", errmsg);
       else
-	fatal_error ("%s: %s", errmsg, xstrerror (errno));
+	fatal_error (input_location, "%s: %s", errmsg, xstrerror (errno));
     }
 }
 

@@ -1,5 +1,5 @@
 /* Generate the machine mode enumeration and associated tables.
-   Copyright (C) 2003-2014 Free Software Foundation, Inc.
+   Copyright (C) 2003-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,7 +20,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "bconfig.h"
 #include "system.h"
 #include "errors.h"
-#include "hashtab.h"
 
 /* enum mode_class is normally defined by machmode.h but we can't
    include that header here.  */
@@ -336,6 +335,7 @@ complete_mode (struct mode_data *m)
       break;
 
     case MODE_INT:
+    case MODE_POINTER_BOUNDS:
     case MODE_FLOAT:
     case MODE_DECIMAL_FLOAT:
     case MODE_FRACT:
@@ -536,6 +536,19 @@ make_special_mode (enum mode_class cl, const char *name,
 {
   new_mode (cl, name, file, line);
 }
+
+#define POINTER_BOUNDS_MODE(N, Y) \
+  make_pointer_bounds_mode (#N, Y, __FILE__, __LINE__)
+
+static void ATTRIBUTE_UNUSED
+make_pointer_bounds_mode (const char *name,
+			  unsigned int bytesize,
+			  const char *file, unsigned int line)
+{
+  struct mode_data *m = new_mode (MODE_POINTER_BOUNDS, name, file, line);
+  m->bytesize = bytesize;
+}
+
 
 #define INT_MODE(N, Y) FRACTIONAL_INT_MODE (N, -1U, Y)
 #define FRACTIONAL_INT_MODE(N, B, Y) \
@@ -958,7 +971,7 @@ inline __attribute__((__always_inline__))\n\
 extern __inline__ __attribute__((__always_inline__, __gnu_inline__))\n\
 #endif\n\
 unsigned char\n\
-mode_size_inline (enum machine_mode mode)\n\
+mode_size_inline (machine_mode mode)\n\
 {\n\
   extern %sunsigned char mode_size[NUM_MACHINE_MODES];\n\
   switch (mode)\n\
@@ -988,7 +1001,7 @@ inline __attribute__((__always_inline__))\n\
 extern __inline__ __attribute__((__always_inline__, __gnu_inline__))\n\
 #endif\n\
 unsigned char\n\
-mode_nunits_inline (enum machine_mode mode)\n\
+mode_nunits_inline (machine_mode mode)\n\
 {\n\
   extern const unsigned char mode_nunits[NUM_MACHINE_MODES];\n\
   switch (mode)\n\
@@ -1017,7 +1030,7 @@ inline __attribute__((__always_inline__))\n\
 extern __inline__ __attribute__((__always_inline__, __gnu_inline__))\n\
 #endif\n\
 unsigned char\n\
-mode_inner_inline (enum machine_mode mode)\n\
+mode_inner_inline (machine_mode mode)\n\
 {\n\
   extern const unsigned char mode_inner[NUM_MACHINE_MODES];\n\
   switch (mode)\n\
@@ -1026,10 +1039,83 @@ mode_inner_inline (enum machine_mode mode)\n\
   for_all_modes (c, m)
     printf ("    case %smode: return %smode;\n", m->name,
 	    c != MODE_PARTIAL_INT && m->component
-	    ? m->component->name : void_mode->name);
+	    ? m->component->name : m->name);
 
   puts ("\
     default: return mode_inner[mode];\n\
+    }\n\
+}\n");
+}
+
+/* Emit mode_unit_size_inline routine into insn-modes.h header.  */
+static void
+emit_mode_unit_size_inline (void)
+{
+  int c;
+  struct mode_data *m;
+
+  puts ("\
+#ifdef __cplusplus\n\
+inline __attribute__((__always_inline__))\n\
+#else\n\
+extern __inline__ __attribute__((__always_inline__, __gnu_inline__))\n\
+#endif\n\
+unsigned char\n\
+mode_unit_size_inline (machine_mode mode)\n\
+{\n\
+  extern unsigned char mode_unit_size[NUM_MACHINE_MODES];\n\
+  switch (mode)\n\
+    {");
+
+  for_all_modes (c, m)
+    {
+      const char *name = m->name;
+      struct mode_data *m2 = m;
+      if (c != MODE_PARTIAL_INT && m2->component)
+	m2 = m2->component;
+      if (!m2->need_bytesize_adj)
+	printf ("    case %smode: return %u;\n", name, m2->bytesize);
+    }
+
+  puts ("\
+    default: return mode_unit_size[mode];\n\
+    }\n\
+}\n");
+}
+
+/* Emit mode_unit_precision_inline routine into insn-modes.h header.  */
+static void
+emit_mode_unit_precision_inline (void)
+{
+  int c;
+  struct mode_data *m;
+
+  puts ("\
+#ifdef __cplusplus\n\
+inline __attribute__((__always_inline__))\n\
+#else\n\
+extern __inline__ __attribute__((__always_inline__, __gnu_inline__))\n\
+#endif\n\
+unsigned short\n\
+mode_unit_precision_inline (machine_mode mode)\n\
+{\n\
+  extern const unsigned short mode_unit_precision[NUM_MACHINE_MODES];\n\
+  switch (mode)\n\
+    {");
+
+  for_all_modes (c, m)
+    {
+      struct mode_data *m2
+	= (c != MODE_PARTIAL_INT && m->component) ? m->component : m;
+      if (m2->precision != (unsigned int)-1)
+	printf ("    case %smode: return %u;\n", m->name, m2->precision);
+      else
+	printf ("    case %smode: return %u*BITS_PER_UNIT;\n",
+		m->name, m2->bytesize);
+    }
+
+  puts ("\
+    default: return mode_unit_precision[mode];\n\
     }\n\
 }\n");
 }
@@ -1094,6 +1180,7 @@ enum machine_mode\n{");
 
   /* I can't think of a better idea, can you?  */
   printf ("#define CONST_MODE_SIZE%s\n", adj_bytesize ? "" : " const");
+  printf ("#define CONST_MODE_UNIT_SIZE%s\n", adj_bytesize ? "" : " const");
   printf ("#define CONST_MODE_BASE_ALIGN%s\n", adj_alignment ? "" : " const");
 #if 0 /* disabled for backward compatibility, temporary */
   printf ("#define CONST_REAL_FORMAT_FOR_MODE%s\n", adj_format ? "" :" const");
@@ -1108,10 +1195,12 @@ enum machine_mode\n{");
 
   printf ("#define NUM_INT_N_ENTS %d\n", n_int_n_ents);
 
-  puts ("\n#if GCC_VERSION >= 4001\n");
+  puts ("\n#if !defined (USED_FOR_TARGET) && GCC_VERSION >= 4001\n");
   emit_mode_size_inline ();
   emit_mode_nunits_inline ();
   emit_mode_inner_inline ();
+  emit_mode_unit_size_inline ();
+  emit_mode_unit_precision_inline ();
   puts ("#endif /* GCC_VERSION >= 4001 */");
 
   puts ("\
@@ -1325,11 +1414,52 @@ emit_mode_inner (void)
   for_all_modes (c, m)
     tagged_printf ("%smode",
 		   c != MODE_PARTIAL_INT && m->component
-		   ? m->component->name : void_mode->name,
+		   ? m->component->name : m->name,
 		   m->name);
 
   print_closer ();
 }
+
+/* Emit mode_unit_size array into insn-modes.c file.  */
+static void
+emit_mode_unit_size (void)
+{
+  int c;
+  struct mode_data *m;
+
+  print_maybe_const_decl ("%sunsigned char", "mode_unit_size",
+			  "NUM_MACHINE_MODES", bytesize);
+
+  for_all_modes (c, m)
+    tagged_printf ("%u",
+		   c != MODE_PARTIAL_INT && m->component
+		   ? m->component->bytesize : m->bytesize, m->name);
+
+  print_closer ();
+}
+
+/* Emit mode_unit_precision array into insn-modes.c file.  */
+static void
+emit_mode_unit_precision (void)
+{
+  int c;
+  struct mode_data *m;
+
+  print_decl ("unsigned short", "mode_unit_precision", "NUM_MACHINE_MODES");
+
+  for_all_modes (c, m)
+    {
+      struct mode_data *m2 = (c != MODE_PARTIAL_INT && m->component) ?
+			     m->component : m;
+      if (m2->precision != (unsigned int)-1)
+	tagged_printf ("%u", m2->precision, m->name);
+      else
+	tagged_printf ("%u*BITS_PER_UNIT", m2->bytesize, m->name);
+    }
+
+  print_closer ();
+}
+
 
 static void
 emit_mode_base_align (void)
@@ -1426,6 +1556,7 @@ emit_mode_adjustments (void)
       printf ("\n  /* %s:%d */\n  s = %s;\n",
 	      a->file, a->line, a->adjustment);
       printf ("  mode_size[%smode] = s;\n", a->mode->name);
+      printf ("  mode_unit_size[%smode] = s;\n", a->mode->name);
       printf ("  mode_base_align[%smode] = s & (~s + 1);\n",
 	      a->mode->name);
 
@@ -1436,6 +1567,7 @@ emit_mode_adjustments (void)
 	    case MODE_COMPLEX_INT:
 	    case MODE_COMPLEX_FLOAT:
 	      printf ("  mode_size[%smode] = 2*s;\n", m->name);
+	      printf ("  mode_unit_size[%smode] = s;\n", m->name);
 	      printf ("  mode_base_align[%smode] = s & (~s + 1);\n",
 		      m->name);
 	      break;
@@ -1448,6 +1580,7 @@ emit_mode_adjustments (void)
 	    case MODE_VECTOR_UACCUM:
 	      printf ("  mode_size[%smode] = %d*s;\n",
 		      m->name, m->ncomponents);
+	      printf ("  mode_unit_size[%smode] = s;\n", m->name);
 	      printf ("  mode_base_align[%smode] = (%d*s) & (~(%d*s)+1);\n",
 		      m->name, m->ncomponents, m->ncomponents);
 	      break;
@@ -1586,11 +1719,7 @@ emit_mode_int_n (void)
   for (i = 0; i<n_modes - 1; i++)
     for (j = i + 1; j < n_modes; j++)
       if (mode_sort[i]->int_n > mode_sort[j]->int_n)
-	{
-	  m = mode_sort[i];
-	  mode_sort[i] = mode_sort[j];
-	  mode_sort[j] = m;
-	}
+	std::swap (mode_sort[i], mode_sort[j]);
 
   for (i = 0; i < n_modes; i ++)
     {
@@ -1617,6 +1746,8 @@ emit_insn_modes_c (void)
   emit_mode_wider ();
   emit_mode_mask ();
   emit_mode_inner ();
+  emit_mode_unit_size ();
+  emit_mode_unit_precision ();
   emit_mode_base_align ();
   emit_class_narrowest_mode ();
   emit_real_format_for_mode ();

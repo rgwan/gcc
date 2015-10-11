@@ -1,5 +1,5 @@
 /* Handle #pragma, system V.4 style.  Supports #pragma weak and #pragma pack.
-   Copyright (C) 1992-2014 Free Software Foundation, Inc.
+   Copyright (C) 1992-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,16 +21,13 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
+#include "options.h"
 #include "stringpool.h"
 #include "attribs.h"
 #include "varasm.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
 #include "hard-reg-set.h"
-#include "input.h"
 #include "function.h"		/* For cfun.  FIXME: Does the parser know
 				   when it is inside a function, so that
 				   we don't have to look at cfun?  */
@@ -51,11 +48,11 @@ along with GCC; see the file COPYING3.  If not see
 #define GCC_BAD2(gmsgid, arg) \
   do { warning (OPT_Wpragmas, gmsgid, arg); return; } while (0)
 
-typedef struct GTY(()) align_stack {
+struct GTY(()) align_stack {
   int		       alignment;
   tree		       id;
   struct align_stack * prev;
-} align_stack;
+};
 
 static GTY(()) struct align_stack * alignment_stack;
 
@@ -239,11 +236,11 @@ handle_pragma_pack (cpp_reader * ARG_UNUSED (dummy))
     }
 }
 
-typedef struct GTY(()) pending_weak_d
+struct GTY(()) pending_weak
 {
   tree name;
   tree value;
-} pending_weak;
+};
 
 
 static GTY(()) vec<pending_weak, va_gc> *pending_weaks;
@@ -292,7 +289,7 @@ maybe_apply_pragma_weak (tree decl)
   /* If it's not a function or a variable, it can't be weak.
      FIXME: what kinds of things are visible outside this file but
      aren't functions or variables?   Should this be an assert instead?  */
-  if (TREE_CODE (decl) != FUNCTION_DECL && TREE_CODE (decl) != VAR_DECL)
+  if (!VAR_OR_FUNCTION_DECL_P (decl))
     return;
 
   if (DECL_ASSEMBLER_NAME_SET_P (decl))
@@ -341,7 +338,7 @@ maybe_apply_pending_pragma_weaks (void)
       DECL_ARTIFICIAL (decl) = 1;
       TREE_PUBLIC (decl) = 1;
       DECL_WEAK (decl) = 1;
-      if (TREE_CODE (decl) == VAR_DECL)
+      if (VAR_P (decl))
 	TREE_STATIC (decl) = 1;
       if (!target)
 	{
@@ -378,11 +375,14 @@ handle_pragma_weak (cpp_reader * ARG_UNUSED (dummy))
   decl = identifier_global_value (name);
   if (decl && DECL_P (decl))
     {
+      if (!VAR_OR_FUNCTION_DECL_P (decl))
+	GCC_BAD2 ("%<#pragma weak%> declaration of %q+D not allowed,"
+		  " ignored", decl);
       apply_pragma_weak (decl, value);
       if (value)
 	{
 	  DECL_EXTERNAL (decl) = 0;
-	  if (TREE_CODE (decl) == VAR_DECL)
+	  if (VAR_P (decl))
 	    TREE_STATIC (decl) = 1;
 	  assemble_alias (decl, value);
 	}
@@ -426,10 +426,10 @@ handle_pragma_weak (cpp_reader * ARG_UNUSED (dummy))
       if it appears afterward, we have no way of knowing whether a modified
       DECL_ASSEMBLER_NAME is due to #pragma extern_prefix.)  */
 
-typedef struct GTY(()) pending_redefinition_d {
+struct GTY(()) pending_redefinition {
   tree oldname;
   tree newname;
-} pending_redefinition;
+};
 
 
 static GTY(()) vec<pending_redefinition, va_gc> *pending_redefine_extname;
@@ -469,8 +469,7 @@ handle_pragma_redefine_extname (cpp_reader * ARG_UNUSED (dummy))
 	}
 
       if ((TREE_PUBLIC (decl) || DECL_EXTERNAL (decl))
-	  && (TREE_CODE (decl) == FUNCTION_DECL
-	      || TREE_CODE (decl) == VAR_DECL))
+	  && VAR_OR_FUNCTION_DECL_P (decl))
 	{
 	  found = true;
 	  if (DECL_ASSEMBLER_NAME_SET_P (decl))
@@ -530,7 +529,7 @@ maybe_apply_renaming_pragma (tree decl, tree asmname)
 
   /* The renaming pragmas are only applied to declarations with
      external linkage.  */
-  if ((TREE_CODE (decl) != FUNCTION_DECL && TREE_CODE (decl) != VAR_DECL)
+  if (!VAR_OR_FUNCTION_DECL_P (decl)
       || (!TREE_PUBLIC (decl) && !DECL_EXTERNAL (decl))
       || !has_c_linkage (decl))
     return asmname;
@@ -895,13 +894,13 @@ handle_pragma_optimize (cpp_reader *ARG_UNUSED(dummy))
 /* Stack of the #pragma GCC options created with #pragma GCC push_option.  Save
    both the binary representation of the options and the TREE_LIST of
    strings that will be added to the function's attribute list.  */
-typedef struct GTY(()) opt_stack {
+struct GTY(()) opt_stack {
   struct opt_stack *prev;
   tree target_binary;
   tree target_strings;
   tree optimize_binary;
   tree optimize_strings;
-} opt_stack;
+};
 
 static GTY(()) struct opt_stack * options_stack;
 
@@ -1166,16 +1165,27 @@ handle_pragma_float_const_decimal64 (cpp_reader *ARG_UNUSED (dummy))
 
 static vec<internal_pragma_handler> registered_pragmas;
 
-typedef struct
+struct pragma_ns_name
 {
   const char *space;
   const char *name;
-} pragma_ns_name;
+};
 
 
 static vec<pragma_ns_name> registered_pp_pragmas;
 
 struct omp_pragma_def { const char *name; unsigned int id; };
+static const struct omp_pragma_def oacc_pragmas[] = {
+  { "cache", PRAGMA_OACC_CACHE },
+  { "data", PRAGMA_OACC_DATA },
+  { "enter", PRAGMA_OACC_ENTER_DATA },
+  { "exit", PRAGMA_OACC_EXIT_DATA },
+  { "kernels", PRAGMA_OACC_KERNELS },
+  { "loop", PRAGMA_OACC_LOOP },
+  { "parallel", PRAGMA_OACC_PARALLEL },
+  { "update", PRAGMA_OACC_UPDATE },
+  { "wait", PRAGMA_OACC_WAIT }
+};
 static const struct omp_pragma_def omp_pragmas[] = {
   { "atomic", PRAGMA_OMP_ATOMIC },
   { "barrier", PRAGMA_OMP_BARRIER },
@@ -1208,10 +1218,19 @@ static const struct omp_pragma_def omp_pragmas_simd[] = {
 void
 c_pp_lookup_pragma (unsigned int id, const char **space, const char **name)
 {
+  const int n_oacc_pragmas = sizeof (oacc_pragmas) / sizeof (*oacc_pragmas);
   const int n_omp_pragmas = sizeof (omp_pragmas) / sizeof (*omp_pragmas);
   const int n_omp_pragmas_simd = sizeof (omp_pragmas_simd)
 				 / sizeof (*omp_pragmas);
   int i;
+
+  for (i = 0; i < n_oacc_pragmas; ++i)
+    if (oacc_pragmas[i].id == id)
+      {
+	*space = "acc";
+	*name = oacc_pragmas[i].name;
+	return;
+      }
 
   for (i = 0; i < n_omp_pragmas; ++i)
     if (omp_pragmas[i].id == id)
@@ -1379,6 +1398,17 @@ c_invoke_pragma_handler (unsigned int id)
 void
 init_pragma (void)
 {
+  if (flag_openacc)
+    {
+      const int n_oacc_pragmas
+	= sizeof (oacc_pragmas) / sizeof (*oacc_pragmas);
+      int i;
+
+      for (i = 0; i < n_oacc_pragmas; ++i)
+	cpp_register_deferred_pragma (parse_in, "acc", oacc_pragmas[i].name,
+				      oacc_pragmas[i].id, true, true);
+    }
+
   if (flag_openmp)
     {
       const int n_omp_pragmas = sizeof (omp_pragmas) / sizeof (*omp_pragmas);

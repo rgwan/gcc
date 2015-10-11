@@ -1,5 +1,5 @@
 /* Command line option handling.
-   Copyright (C) 2002-2014 Free Software Foundation, Inc.
+   Copyright (C) 2002-2015 Free Software Foundation, Inc.
    Contributed by Neil Booth.
 
 This file is part of GCC.
@@ -23,14 +23,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "intl.h"
 #include "coretypes.h"
 #include "opts.h"
-#include "options.h"
-#include "tm.h" /* For STACK_CHECK_BUILTIN,
-		   STACK_CHECK_STATIC_BUILTIN, DEFAULT_GDB_EXTENSIONS,
-		   DWARF2_DEBUGGING_INFO and DBX_DEBUGGING_INFO.  */
+#include "tm.h"
 #include "flags.h"
 #include "params.h"
 #include "diagnostic.h"
-#include "diagnostic-color.h"
 #include "opts-diagnostic.h"
 #include "insn-attr-common.h"
 #include "common/common-target.h"
@@ -307,6 +303,14 @@ init_options_struct (struct gcc_options *opts, struct gcc_options *opts_set)
   targetm_common.option_init_struct (opts);
 }
 
+/* Release any allocations owned by OPTS.  */
+
+void
+finalize_options_struct (struct gcc_options *opts)
+{
+  XDELETEVEC (opts->x_param_values);
+}
+
 /* If indicated by the optimization level LEVEL (-Os if SIZE is set,
    -Ofast if FAST is set, -Og if DEBUG is set), apply the option DEFAULT_OPT
    to OPTS and OPTS_SET, diagnostic context DC, location LOC, with language
@@ -441,12 +445,12 @@ static const struct default_options default_options_table[] =
     { OPT_LEVELS_1_PLUS, OPT_fsplit_wide_types, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_ccp, NULL, 1 },
     { OPT_LEVELS_1_PLUS_NOT_DEBUG, OPT_ftree_bit_ccp, NULL, 1 },
+    { OPT_LEVELS_1_PLUS, OPT_ftree_coalesce_vars, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_dce, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_dominator_opts, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_dse, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_ter, NULL, 1 },
     { OPT_LEVELS_1_PLUS_NOT_DEBUG, OPT_ftree_sra, NULL, 1 },
-    { OPT_LEVELS_1_PLUS, OPT_ftree_copyrename, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_fre, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_copy_prop, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_sink, NULL, 1 },
@@ -486,6 +490,7 @@ static const struct default_options default_options_table[] =
     { OPT_LEVELS_2_PLUS, OPT_ftree_pre, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_ftree_switch_conversion, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fipa_cp, NULL, 1 },
+    { OPT_LEVELS_2_PLUS, OPT_fipa_cp_alignment, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fdevirtualize, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fdevirtualize_speculatively, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fipa_sra, NULL, 1 },
@@ -499,7 +504,8 @@ static const struct default_options default_options_table[] =
     { OPT_LEVELS_2_PLUS, OPT_fhoist_adjacent_loads, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fipa_icf, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fisolate_erroneous_paths_dereference, NULL, 1 },
-    { OPT_LEVELS_2_PLUS, OPT_fuse_caller_save, NULL, 1 },
+    { OPT_LEVELS_2_PLUS, OPT_fipa_ra, NULL, 1 },
+    { OPT_LEVELS_2_PLUS, OPT_flra_remat, NULL, 1 },
 
     /* -O3 optimizations.  */
     { OPT_LEVELS_3_PLUS, OPT_ftree_loop_distribute_patterns, NULL, 1 },
@@ -732,12 +738,26 @@ finish_options (struct gcc_options *opts, struct gcc_options *opts_set,
 
   if (!opts->x_flag_opts_finished)
     {
+      /* We initialize opts->x_flag_pie to -1 so that targets can set a
+	 default value.  */
+      if (opts->x_flag_pie == -1)
+	{
+	  if (opts->x_flag_pic == 0)
+	    opts->x_flag_pie = DEFAULT_FLAG_PIE;
+	  else
+	    opts->x_flag_pie = 0;
+	}
       if (opts->x_flag_pie)
 	opts->x_flag_pic = opts->x_flag_pie;
       if (opts->x_flag_pic && !opts->x_flag_pie)
 	opts->x_flag_shlib = 1;
       opts->x_flag_opts_finished = true;
     }
+
+  /* We initialize opts->x_flag_stack_protect to -1 so that targets
+     can set a default value.  */
+  if (opts->x_flag_stack_protect == -1)
+    opts->x_flag_stack_protect = DEFAULT_FLAG_SSP;
 
   if (opts->x_optimize == 0)
     {
@@ -877,13 +897,15 @@ finish_options (struct gcc_options *opts, struct gcc_options *opts_set,
   if (opts->x_dwarf_split_debug_info)
     opts->x_debug_generate_pub_sections = 2;
 
-  /* Userspace and kernel ASan conflict with each other and with TSan.  */
+  /* Userspace and kernel ASan conflict with each other.  */
 
   if ((opts->x_flag_sanitize & SANITIZE_USER_ADDRESS)
       && (opts->x_flag_sanitize & SANITIZE_KERNEL_ADDRESS))
     error_at (loc,
 	      "-fsanitize=address is incompatible with "
 	      "-fsanitize=kernel-address");
+
+  /* And with TSan.  */
 
   if ((opts->x_flag_sanitize & SANITIZE_ADDRESS)
       && (opts->x_flag_sanitize & SANITIZE_THREAD))
@@ -901,6 +923,19 @@ finish_options (struct gcc_options *opts, struct gcc_options *opts_set,
 
   if (opts->x_flag_sanitize_recover & SANITIZE_LEAK)
     error_at (loc, "-fsanitize-recover=leak is not supported");
+
+  /* When instrumenting the pointers, we don't want to remove
+     the null pointer checks.  */
+  if (opts->x_flag_sanitize & (SANITIZE_NULL | SANITIZE_NONNULL_ATTRIBUTE
+				| SANITIZE_RETURNS_NONNULL_ATTRIBUTE))
+    opts->x_flag_delete_null_pointer_checks = 0;
+
+  /* Aggressive compiler optimizations may cause false negatives.  */
+  if (opts->x_flag_sanitize)
+    {
+      opts->x_flag_aggressive_loop_optimizations = 0;
+      opts->x_flag_strict_overflow = 0;
+    }
 }
 
 #define LEFT_COLUMN	27
@@ -1083,7 +1118,7 @@ print_filtered_help (unsigned int include_flags,
 		      if (* (const char **) flag_var != NULL)
 			snprintf (new_help + strlen (new_help),
 				  sizeof (new_help) - strlen (new_help),
-				  * (const char **) flag_var);
+				  "%s", * (const char **) flag_var);
 		    }
 		  else if (option->var_type == CLVC_ENUM)
 		    {
@@ -1097,7 +1132,7 @@ print_filtered_help (unsigned int include_flags,
 			arg = _("[default]");
 		      snprintf (new_help + strlen (new_help),
 				sizeof (new_help) - strlen (new_help),
-				arg);
+				"%s", arg);
 		    }
 		  else
 		    sprintf (new_help + strlen (new_help),
@@ -1208,18 +1243,8 @@ print_specific_help (unsigned int include_flags,
      the desired maximum width of the output.  */
   if (opts->x_help_columns == 0)
     {
-      const char *p;
-
-      p = getenv ("COLUMNS");
-      if (p != NULL)
-	{
-	  int value = atoi (p);
-
-	  if (value > 0)
-	    opts->x_help_columns = value;
-	}
-
-      if (opts->x_help_columns == 0)
+      opts->x_help_columns = get_terminal_width ();
+      if (opts->x_help_columns == INT_MAX)
 	/* Use a reasonable default.  */
 	opts->x_help_columns = 80;
     }
@@ -1317,6 +1342,9 @@ enable_fdo_optimizations (struct gcc_options *opts,
   if (!opts_set->x_flag_ipa_cp_clone
       && value && opts->x_flag_ipa_cp)
     opts->x_flag_ipa_cp_clone = value;
+  if (!opts_set->x_flag_ipa_cp_alignment
+      && value && opts->x_flag_ipa_cp)
+    opts->x_flag_ipa_cp_alignment = value;
   if (!opts_set->x_flag_predictive_commoning)
     opts->x_flag_predictive_commoning = value;
   if (!opts_set->x_flag_unswitch_loops)
@@ -1369,7 +1397,7 @@ common_handle_option (struct gcc_options *opts,
 	unsigned int i;
 
 	if (lang_mask == CL_DRIVER)
-	  break;;
+	  break;
 
 	undoc_mask = ((opts->x_verbose_flag | opts->x_extra_warnings)
 		      ? 0
@@ -1567,6 +1595,8 @@ common_handle_option (struct gcc_options *opts,
 	      { "float-cast-overflow", SANITIZE_FLOAT_CAST,
 		sizeof "float-cast-overflow" - 1 },
 	      { "bounds", SANITIZE_BOUNDS, sizeof "bounds" - 1 },
+	      { "bounds-strict", SANITIZE_BOUNDS | SANITIZE_BOUNDS_STRICT,
+		sizeof "bounds-strict" - 1 },
 	      { "alignment", SANITIZE_ALIGNMENT, sizeof "alignment" - 1 },
 	      { "nonnull-attribute", SANITIZE_NONNULL_ATTRIBUTE,
 		sizeof "nonnull-attribute" - 1 },
@@ -1575,6 +1605,8 @@ common_handle_option (struct gcc_options *opts,
 		sizeof "returns-nonnull-attribute" - 1 },
 	      { "object-size", SANITIZE_OBJECT_SIZE,
 		sizeof "object-size" - 1 },
+	      { "vptr", SANITIZE_VPTR, sizeof "vptr" - 1 },
+	      { "all", ~0, sizeof "all" - 1 },
 	      { NULL, 0, 0 }
 	    };
 	    const char *comma;
@@ -1598,7 +1630,15 @@ common_handle_option (struct gcc_options *opts,
 		  && memcmp (p, spec[i].name, len) == 0)
 		{
 		  /* Handle both -fsanitize and -fno-sanitize cases.  */
-		  if (value)
+		  if (value && spec[i].flag == ~0U)
+		    {
+		      if (code == OPT_fsanitize_)
+			error_at (loc, "-fsanitize=all option is not valid");
+		      else
+			*flag |= ~(SANITIZE_USER_ADDRESS | SANITIZE_THREAD
+				   | SANITIZE_LEAK);
+		    }
+		  else if (value)
 		    *flag |= spec[i].flag;
 		  else
 		    *flag &= ~spec[i].flag;
@@ -1618,12 +1658,6 @@ common_handle_option (struct gcc_options *opts,
 
 	if (code != OPT_fsanitize_)
 	  break;
-
-	/* When instrumenting the pointers, we don't want to remove
-	   the null pointer checks.  */
-	if (opts->x_flag_sanitize & (SANITIZE_NULL | SANITIZE_NONNULL_ATTRIBUTE
-				     | SANITIZE_RETURNS_NONNULL_ATTRIBUTE))
-	  opts->x_flag_delete_null_pointer_checks = 0;
 
 	/* Kernel ASan implies normal ASan but does not yet support
 	   all features.  */
@@ -1645,6 +1679,10 @@ common_handle_option (struct gcc_options *opts,
 
 	break;
       }
+
+    case OPT_fasan_shadow_offset_:
+      /* Deferred.  */
+      break;
 
     case OPT_fsanitize_recover:
       if (value)
@@ -1732,8 +1770,12 @@ common_handle_option (struct gcc_options *opts,
       break;
 
     case OPT_fdbg_cnt_:
+      /* Deferred.  */
+      break;
+
     case OPT_fdbg_cnt_list:
       /* Deferred.  */
+      opts->x_exit_after_options = true;
       break;
 
     case OPT_fdebug_prefix_map_:
@@ -1749,8 +1791,7 @@ common_handle_option (struct gcc_options *opts,
       break;
 
     case OPT_fdiagnostics_color_:
-      pp_show_color (dc->printer)
-	= colorize_init ((diagnostic_color_rule_t) value);
+      diagnostic_color_init (dc, value);
       break;
 
     case OPT_fdiagnostics_show_option:
@@ -1799,6 +1840,17 @@ common_handle_option (struct gcc_options *opts,
     case OPT_fopt_info_:
       /* Deferred.  */
       break;
+
+    case OPT_foffload_:
+      /* Deferred.  */
+      break;
+
+#ifndef ACCEL_COMPILER
+    case OPT_foffload_abi_:
+      error_at (loc, "-foffload-abi option can be specified only for "
+		"offload compiler");
+      break;
+#endif
 
     case OPT_fpack_struct_:
       if (value <= 0 || (value & (value - 1)) || value > 16)
@@ -1917,7 +1969,7 @@ common_handle_option (struct gcc_options *opts,
 			     ? STATIC_BUILTIN_STACK_CHECK
 			     : GENERIC_STACK_CHECK;
       else
-	warning_at (loc, 0, "unknown stack check parameter \"%s\"", arg);
+	warning_at (loc, 0, "unknown stack check parameter %qs", arg);
       break;
 
     case OPT_fstack_limit:
@@ -1959,7 +2011,7 @@ common_handle_option (struct gcc_options *opts,
       
       /* FALLTHRU */
     case OPT_gdwarf_:
-      if (value < 2 || value > 4)
+      if (value < 2 || value > 5)
 	error_at (loc, "dwarf version %d is not supported", value);
       else
 	opts->x_dwarf_version = value;
@@ -2176,7 +2228,7 @@ set_debug_level (enum debug_info_type type, int extended, const char *arg,
 
 	  if (extended == 2)
 	    {
-#ifdef DWARF2_DEBUGGING_INFO
+#if defined DWARF2_DEBUGGING_INFO || defined DWARF2_LINENO_DEBUGGING_INFO
 	      opts->x_write_symbols = DWARF2_DEBUG;
 #elif defined DBX_DEBUGGING_INFO
 	      opts->x_write_symbols = DBX_DEBUG;
@@ -2193,7 +2245,7 @@ set_debug_level (enum debug_info_type type, int extended, const char *arg,
       if (opts_set->x_write_symbols != NO_DEBUG
 	  && opts->x_write_symbols != NO_DEBUG
 	  && type != opts->x_write_symbols)
-	error_at (loc, "debug format \"%s\" conflicts with prior selection",
+	error_at (loc, "debug format %qs conflicts with prior selection",
 		  debug_type_names[type]);
       opts->x_write_symbols = type;
       opts_set->x_write_symbols = type;
@@ -2211,9 +2263,9 @@ set_debug_level (enum debug_info_type type, int extended, const char *arg,
     {
       int argval = integral_argument (arg);
       if (argval == -1)
-	error_at (loc, "unrecognised debug output level \"%s\"", arg);
+	error_at (loc, "unrecognised debug output level %qs", arg);
       else if (argval > 3)
-	error_at (loc, "debug output level %s is too high", arg);
+	error_at (loc, "debug output level %qs is too high", arg);
       else
 	opts->x_debug_info_level = (enum debug_info_levels) argval;
     }
@@ -2233,10 +2285,11 @@ setup_core_dumping (diagnostic_context *dc)
   {
     struct rlimit rlim;
     if (getrlimit (RLIMIT_CORE, &rlim) != 0)
-      fatal_error ("getting core file size maximum limit: %m");
+      fatal_error (input_location, "getting core file size maximum limit: %m");
     rlim.rlim_cur = rlim.rlim_max;
     if (setrlimit (RLIMIT_CORE, &rlim) != 0)
-      fatal_error ("setting core file size limit to maximum: %m");
+      fatal_error (input_location,
+		   "setting core file size limit to maximum: %m");
   }
 #endif
   diagnostic_abort_on_error (dc);

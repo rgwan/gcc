@@ -1,5 +1,5 @@
 /* Compilation switch flag type definitions for GCC.
-   Copyright (C) 1987-2014 Free Software Foundation, Inc.
+   Copyright (C) 1987-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -90,19 +90,6 @@ enum debug_struct_file
                                header files.  */
   DINFO_STRUCT_FILE_ANY     /* Debug structs defined in all files. */
 };
-
-/* Enumerate visibility settings.  This is deliberately ordered from most
-   to least visibility.  */
-#ifndef SYMBOL_VISIBILITY_DEFINED
-#define SYMBOL_VISIBILITY_DEFINED
-enum symbol_visibility
-{
-  VISIBILITY_DEFAULT,
-  VISIBILITY_PROTECTED,
-  VISIBILITY_HIDDEN,
-  VISIBILITY_INTERNAL
-};
-#endif
 
 /* Enumerate Objective-c instance variable visibility settings. */
 
@@ -237,14 +224,17 @@ enum sanitize_code {
   SANITIZE_NONNULL_ATTRIBUTE = 1UL << 18,
   SANITIZE_RETURNS_NONNULL_ATTRIBUTE = 1UL << 19,
   SANITIZE_OBJECT_SIZE = 1UL << 20,
+  SANITIZE_VPTR = 1UL << 21,
+  SANITIZE_BOUNDS_STRICT = 1UL << 22,
   SANITIZE_UNDEFINED = SANITIZE_SHIFT | SANITIZE_DIVIDE | SANITIZE_UNREACHABLE
 		       | SANITIZE_VLA | SANITIZE_NULL | SANITIZE_RETURN
 		       | SANITIZE_SI_OVERFLOW | SANITIZE_BOOL | SANITIZE_ENUM
 		       | SANITIZE_BOUNDS | SANITIZE_ALIGNMENT
 		       | SANITIZE_NONNULL_ATTRIBUTE
 		       | SANITIZE_RETURNS_NONNULL_ATTRIBUTE
-		       | SANITIZE_OBJECT_SIZE,
+		       | SANITIZE_OBJECT_SIZE | SANITIZE_VPTR,
   SANITIZE_NONDEFAULT = SANITIZE_FLOAT_DIVIDE | SANITIZE_FLOAT_CAST
+			| SANITIZE_BOUNDS_STRICT
 };
 
 /* flag_vtable_verify initialization levels. */
@@ -263,10 +253,38 @@ enum lto_partition_model {
   LTO_PARTITION_MAX = 4
 };
 
-/* The code generator used by graphite */
-enum fgraphite_generator {
-  FGRAPHITE_CODE_GEN_ISL = 0,
-  FGRAPHITE_CODE_GEN_CLOOG = 1
+
+/* gfortran -finit-real= values.  */
+
+enum gfc_init_local_real
+{
+  GFC_INIT_REAL_OFF = 0,
+  GFC_INIT_REAL_ZERO,
+  GFC_INIT_REAL_NAN,
+  GFC_INIT_REAL_SNAN,
+  GFC_INIT_REAL_INF,
+  GFC_INIT_REAL_NEG_INF
 };
+
+/* gfortran -fcoarray= values.  */
+
+enum gfc_fcoarray
+{
+  GFC_FCOARRAY_NONE = 0,
+  GFC_FCOARRAY_SINGLE,
+  GFC_FCOARRAY_LIB
+};
+
+
+/* gfortran -fconvert= values; used for unformatted I/O.
+   Keep in sync with GFC_CONVERT_* in gcc/fortran/libgfortran.h.   */
+enum gfc_convert
+{
+  GFC_FLAG_CONVERT_NATIVE = 0,
+  GFC_FLAG_CONVERT_SWAP,
+  GFC_FLAG_CONVERT_BIG,
+  GFC_FLAG_CONVERT_LITTLE
+};
+
 
 #endif /* ! GCC_FLAG_TYPES_H */

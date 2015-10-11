@@ -1,5 +1,5 @@
 /* Code to maintain a C++ template repository.
-   Copyright (C) 1995-2014 Free Software Foundation, Inc.
+   Copyright (C) 1995-2015 Free Software Foundation, Inc.
    Contributed by Jason Merrill (jason@cygnus.com)
 
 This file is part of GCC.
@@ -28,10 +28,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "stringpool.h"
 #include "cp-tree.h"
-#include "input.h"
 #include "obstack.h"
 #include "toplev.h"
 #include "diagnostic-core.h"
@@ -293,7 +293,11 @@ repo_emit_p (tree decl)
   int ret = 0;
   gcc_assert (TREE_PUBLIC (decl));
   gcc_assert (VAR_OR_FUNCTION_DECL_P (decl));
-  gcc_assert (!DECL_REALLY_EXTERN (decl));
+  gcc_assert (!DECL_REALLY_EXTERN (decl)
+	      /* A clone might not have its linkage flags updated yet
+		 because we call import_export_decl before
+		 maybe_clone_body.  */
+	      || DECL_ABSTRACT_ORIGIN (decl));
 
   /* When not using the repository, emit everything.  */
   if (!flag_use_repository)

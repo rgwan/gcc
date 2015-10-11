@@ -1,5 +1,5 @@
 /* Functions dealing with attribute handling, used by most front ends.
-   Copyright (C) 1992-2014 Free Software Foundation, Inc.
+   Copyright (C) 1992-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -22,17 +22,16 @@ along with GCC; see the file COPYING3.  If not see
 #include "coretypes.h"
 #include "tm.h"
 #include "tree.h"
+#include "alias.h"
 #include "stringpool.h"
 #include "attribs.h"
 #include "stor-layout.h"
 #include "flags.h"
 #include "diagnostic-core.h"
-#include "ggc.h"
 #include "tm_p.h"
 #include "cpplib.h"
 #include "target.h"
 #include "langhooks.h"
-#include "hash-table.h"
 #include "plugin.h"
 
 /* Table of the tables of attributes (common, language, format, machine)
@@ -57,23 +56,22 @@ substring_hash (const char *str, int l)
 
 /* Used for attribute_hash.  */
 
-struct attribute_hasher : typed_noop_remove <attribute_spec>
+struct attribute_hasher : nofree_ptr_hash <attribute_spec>
 {
-  typedef attribute_spec value_type;
-  typedef substring compare_type;
-  static inline hashval_t hash (const value_type *);
-  static inline bool equal (const value_type *, const compare_type *);
+  typedef substring *compare_type;
+  static inline hashval_t hash (const attribute_spec *);
+  static inline bool equal (const attribute_spec *, const substring *);
 };
 
 inline hashval_t
-attribute_hasher::hash (const value_type *spec)
+attribute_hasher::hash (const attribute_spec *spec)
 {
   const int l = strlen (spec->name);
   return substring_hash (spec->name, l);
 }
 
 inline bool
-attribute_hasher::equal (const value_type *spec, const compare_type *str)
+attribute_hasher::equal (const attribute_spec *spec, const substring *str)
 {
   return (strncmp (spec->name, str->str, str->length) == 0
 	  && !spec->name[str->length]);
@@ -470,10 +468,10 @@ decl_attributes (tree *node, tree attributes, int flags)
 	  /* This is a c++11 attribute that appertains to a
 	     type-specifier, outside of the definition of, a class
 	     type.  Ignore it.  */
-	  warning (OPT_Wattributes, "attribute ignored");
-	  inform (input_location,
-		  "an attribute that appertains to a type-specifier "
-		  "is ignored");
+	  if (warning (OPT_Wattributes, "attribute ignored"))
+	    inform (input_location,
+		    "an attribute that appertains to a type-specifier "
+		    "is ignored");
 	  continue;
 	}
 
@@ -502,11 +500,7 @@ decl_attributes (tree *node, tree attributes, int flags)
       if (spec->type_required && DECL_P (*anode))
 	{
 	  anode = &TREE_TYPE (*anode);
-	  /* Allow ATTR_FLAG_TYPE_IN_PLACE for the type's naming decl.  */
-	  if (!(TREE_CODE (*anode) == TYPE_DECL
-		&& *anode == TYPE_NAME (TYPE_MAIN_VARIANT
-					(TREE_TYPE (*anode)))))
-	    flags &= ~(int) ATTR_FLAG_TYPE_IN_PLACE;
+	  flags &= ~(int) ATTR_FLAG_TYPE_IN_PLACE;
 	}
 
       if (spec->function_type_required && TREE_CODE (*anode) != FUNCTION_TYPE

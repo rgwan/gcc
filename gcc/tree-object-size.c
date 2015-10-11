@@ -1,5 +1,5 @@
 /* __builtin_object_size (ptr, object_size_type) computation
-   Copyright (C) 2004-2014 Free Software Foundation, Inc.
+   Copyright (C) 2004-2015 Free Software Foundation, Inc.
    Contributed by Jakub Jelinek <jakub@redhat.com>
 
 This file is part of GCC.
@@ -21,27 +21,21 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
 #include "tree.h"
+#include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "tree-object-size.h"
 #include "diagnostic-core.h"
 #include "gimple-pretty-print.h"
-#include "bitmap.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
 #include "gimple-fold.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
-#include "gimple-ssa.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-pass.h"
 #include "tree-ssa-propagate.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
 #include "builtins.h"
 
 struct object_size_info
@@ -59,8 +53,8 @@ static const unsigned HOST_WIDE_INT unknown[4] = { -1, -1, 0, 0 };
 static tree compute_object_offset (const_tree, const_tree);
 static unsigned HOST_WIDE_INT addr_object_size (struct object_size_info *,
 						const_tree, int);
-static unsigned HOST_WIDE_INT alloc_object_size (const_gimple, int);
-static tree pass_through_call (const_gimple);
+static unsigned HOST_WIDE_INT alloc_object_size (const gcall *, int);
+static tree pass_through_call (const gcall *);
 static void collect_object_sizes_for (struct object_size_info *, tree);
 static void expr_object_size (struct object_size_info *, tree, tree);
 static bool merge_object_sizes (struct object_size_info *, tree, tree,
@@ -392,7 +386,7 @@ addr_object_size (struct object_size_info *osi, const_tree ptr,
    unknown[object_size_type].  */
 
 static unsigned HOST_WIDE_INT
-alloc_object_size (const_gimple call, int object_size_type)
+alloc_object_size (const gcall *call, int object_size_type)
 {
   tree callee, bytes = NULL_TREE;
   tree alloc_size;
@@ -455,7 +449,7 @@ alloc_object_size (const_gimple call, int object_size_type)
    Otherwise return NULL.  */
 
 static tree
-pass_through_call (const_gimple call)
+pass_through_call (const gcall *call)
 {
   tree callee = gimple_call_fndecl (call);
 
@@ -669,7 +663,7 @@ expr_object_size (struct object_size_info *osi, tree ptr, tree value)
 /* Compute object_sizes for PTR, defined to the result of a call.  */
 
 static void
-call_object_size (struct object_size_info *osi, tree ptr, gimple call)
+call_object_size (struct object_size_info *osi, tree ptr, gcall *call)
 {
   int object_size_type = osi->object_size_type;
   unsigned int varno = SSA_NAME_VERSION (ptr);
@@ -966,7 +960,8 @@ collect_object_sizes_for (struct object_size_info *osi, tree var)
 
     case GIMPLE_CALL:
       {
-        tree arg = pass_through_call (stmt);
+	gcall *call_stmt = as_a <gcall *> (stmt);
+        tree arg = pass_through_call (call_stmt);
         if (arg)
           {
             if (TREE_CODE (arg) == SSA_NAME
@@ -976,7 +971,7 @@ collect_object_sizes_for (struct object_size_info *osi, tree var)
               expr_object_size (osi, var, arg);
           }
         else
-          call_object_size (osi, var, stmt);
+          call_object_size (osi, var, call_stmt);
 	break;
       }
 
@@ -1102,7 +1097,8 @@ check_for_plus_in_loops_1 (struct object_size_info *osi, tree var,
 
     case GIMPLE_CALL:
       {
-        tree arg = pass_through_call (stmt);
+	gcall *call_stmt = as_a <gcall *> (stmt);
+        tree arg = pass_through_call (call_stmt);
         if (arg)
           {
             if (TREE_CODE (arg) == SSA_NAME)
@@ -1250,25 +1246,60 @@ pass_object_sizes::execute (function *fun)
 	    continue;
 
 	  init_object_sizes ();
-	  result = fold_call_stmt (call, false);
+
+	  /* In the first pass instance, only attempt to fold
+	     __builtin_object_size (x, 1) and __builtin_object_size (x, 3),
+	     and rather than folding the builtin to the constant if any,
+	     create a MIN_EXPR or MAX_EXPR of the __builtin_object_size
+	     call result and the computed constant.  */
+	  if (first_pass_instance)
+	    {
+	      tree ost = gimple_call_arg (call, 1);
+	      if (tree_fits_uhwi_p (ost))
+		{
+		  unsigned HOST_WIDE_INT object_size_type = tree_to_uhwi (ost);
+		  tree ptr = gimple_call_arg (call, 0);
+		  tree lhs = gimple_call_lhs (call);
+		  if ((object_size_type == 1 || object_size_type == 3)
+		      && (TREE_CODE (ptr) == ADDR_EXPR
+			  || TREE_CODE (ptr) == SSA_NAME)
+		      && lhs)
+		    {
+		      tree type = TREE_TYPE (lhs);
+		      unsigned HOST_WIDE_INT bytes
+			= compute_builtin_object_size (ptr, object_size_type);
+		      if (bytes != (unsigned HOST_WIDE_INT) (object_size_type == 1
+							     ? -1 : 0)
+			  && wi::fits_to_tree_p (bytes, type))
+			{
+			  tree tem = make_ssa_name (type);
+			  gimple_call_set_lhs (call, tem);
+			  enum tree_code code
+			    = object_size_type == 1 ? MIN_EXPR : MAX_EXPR;
+			  tree cst = build_int_cstu (type, bytes);
+			  gimple g = gimple_build_assign (lhs, code, tem, cst);
+			  gsi_insert_after (&i, g, GSI_NEW_STMT);
+			  update_stmt (call);
+			}
+		    }
+		}
+	      continue;
+	    }
+
+	  result = fold_call_stmt (as_a <gcall *> (call), false);
 	  if (!result)
 	    {
-	      if (gimple_call_num_args (call) == 2
-		  && POINTER_TYPE_P (TREE_TYPE (gimple_call_arg (call, 0))))
+	      tree ost = gimple_call_arg (call, 1);
+
+	      if (tree_fits_uhwi_p (ost))
 		{
-		  tree ost = gimple_call_arg (call, 1);
+		  unsigned HOST_WIDE_INT object_size_type = tree_to_uhwi (ost);
 
-		  if (tree_fits_uhwi_p (ost))
-		    {
-		      unsigned HOST_WIDE_INT object_size_type
-			= tree_to_uhwi (ost);
-
-		      if (object_size_type < 2)
-			result = fold_convert (size_type_node,
-					       integer_minus_one_node);
-		      else if (object_size_type < 4)
-			result = build_zero_cst (size_type_node);
-		    }
+		  if (object_size_type < 2)
+		    result = fold_convert (size_type_node,
+					   integer_minus_one_node);
+		  else if (object_size_type < 4)
+		    result = build_zero_cst (size_type_node);
 		}
 
 	      if (!result)

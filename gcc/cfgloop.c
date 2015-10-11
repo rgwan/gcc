@@ -1,5 +1,5 @@
 /* Natural loop discovery code for GNU compiler.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,25 +20,17 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
+#include "tree.h"
+#include "gimple.h"
 #include "rtl.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
-#include "basic-block.h"
+#include "cfganal.h"
 #include "cfgloop.h"
 #include "diagnostic-core.h"
 #include "flags.h"
-#include "tree.h"
-#include "tree-ssa-alias.h"
+#include "fold-const.h"
 #include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
 #include "gimple-ssa.h"
 #include "dumpfile.h"
@@ -583,8 +575,8 @@ find_subloop_latch_edge_by_ivs (struct loop *loop ATTRIBUTE_UNUSED, vec<edge> la
 {
   edge e, latch = latches[0];
   unsigned i;
-  gimple phi;
-  gimple_stmt_iterator psi;
+  gphi *phi;
+  gphi_iterator psi;
   tree lop;
   basic_block bb;
 
@@ -602,7 +594,7 @@ find_subloop_latch_edge_by_ivs (struct loop *loop ATTRIBUTE_UNUSED, vec<edge> la
      a subloop.  */
   for (psi = gsi_start_phis (loop->header); !gsi_end_p (psi); gsi_next (&psi))
     {
-      phi = gsi_stmt (psi);
+      phi = psi.phi ();
       lop = PHI_ARG_DEF_FROM_EDGE (phi, latch);
 
       /* Ignore the values that are not changed inside the subloop.  */
@@ -952,7 +944,7 @@ get_loop_body_in_bfs_order (const struct loop *loop)
 	    }
 	}
 
-      gcc_assert (i >= vc);
+      gcc_assert (i > vc);
 
       bb = blocks[vc++];
     }
@@ -1339,6 +1331,16 @@ verify_loop_structure (void)
     calculate_dominance_info (CDI_DOMINATORS);
   else
     verify_dominators (CDI_DOMINATORS);
+
+  /* Check the loop tree root.  */
+  if (current_loops->tree_root->header != ENTRY_BLOCK_PTR_FOR_FN (cfun)
+      || current_loops->tree_root->latch != EXIT_BLOCK_PTR_FOR_FN (cfun)
+      || (current_loops->tree_root->num_nodes
+	  != (unsigned) n_basic_blocks_for_fn (cfun)))
+    {
+      error ("corrupt loop tree root");
+      err = 1;
+    }
 
   /* Check the headers.  */
   FOR_EACH_BB_FN (bb, cfun)
@@ -1924,9 +1926,10 @@ bb_loop_depth (const_basic_block bb)
 void
 mark_loop_for_removal (loop_p loop)
 {
+  if (loop->header == NULL)
+    return;
   loop->former_header = loop->header;
   loop->header = NULL;
   loop->latch = NULL;
   loops_state_set (LOOPS_NEED_FIXUP);
 }
-

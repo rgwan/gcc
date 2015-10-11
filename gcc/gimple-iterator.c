@@ -1,5 +1,5 @@
 /* Iterator routines for GIMPLE statements.
-   Copyright (C) 2007-2014 Free Software Foundation, Inc.
+   Copyright (C) 2007-2015 Free Software Foundation, Inc.
    Contributed by Aldy Hernandez  <aldy@quesejoda.com>
 
 This file is part of GCC.
@@ -21,21 +21,19 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
+#include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "internal-fn.h"
 #include "tree-eh.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
-#include "gimple-ssa.h"
 #include "cgraph.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
 #include "tree-ssa.h"
 #include "value-prof.h"
 
@@ -53,7 +51,7 @@ update_modified_stmt (gimple stmt)
 
 /* Mark the statements in SEQ as modified, and update them.  */
 
-static void
+void
 update_modified_stmts (gimple_seq seq)
 {
   gimple_stmt_iterator gsi;
@@ -626,6 +624,19 @@ gsi_for_stmt (gimple stmt)
   return i;
 }
 
+/* Finds iterator for PHI.  */
+
+gphi_iterator
+gsi_for_phi (gphi *phi)
+{
+  gphi_iterator i;
+  basic_block bb = gimple_bb (phi);
+
+  i = gsi_start_phis (bb);
+  i.ptr = phi;
+
+  return i;
+}
 
 /* Move the statement at FROM so it comes right after the statement at TO.  */
 
@@ -886,9 +897,17 @@ gsi_commit_one_edge_insert (edge e, basic_block *new_bb)
 
 /* Returns iterator at the start of the list of phi nodes of BB.  */
 
-gimple_stmt_iterator
+gphi_iterator
 gsi_start_phis (basic_block bb)
 {
   gimple_seq *pseq = phi_nodes_ptr (bb);
-  return gsi_start_1 (pseq);
+
+  /* Adapted from gsi_start_1. */
+  gphi_iterator i;
+
+  i.ptr = gimple_seq_first (*pseq);
+  i.seq = pseq;
+  i.bb = i.ptr ? gimple_bb (i.ptr) : NULL;
+
+  return i;
 }

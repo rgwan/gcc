@@ -1,7 +1,7 @@
 /* This file is part of the Intel(R) Cilk(TM) Plus support
    This file contains routines to handle Array Notation expression
    handling routines in the C Compiler.
-   Copyright (C) 2013-2014 Free Software Foundation, Inc.
+   Copyright (C) 2013-2015 Free Software Foundation, Inc.
    Contributed by Balaji V. Iyer <balaji.v.iyer@intel.com>,
                   Intel Corporation.
 
@@ -69,6 +69,7 @@
 #include "system.h"
 #include "coretypes.h"
 #include "tree.h"
+#include "alias.h"
 #include "c-tree.h"
 #include "gimple-expr.h"
 #include "tree-iterator.h"
@@ -84,7 +85,7 @@ make_triplet_val_inv (location_t loc, tree *value)
   tree var, new_exp;
   if (TREE_CODE (*value) != INTEGER_CST
       && TREE_CODE (*value) != PARM_DECL
-      && TREE_CODE (*value) != VAR_DECL)
+      && !VAR_P (*value))
     {
       var = build_decl (loc, VAR_DECL, NULL_TREE, integer_type_node);
       new_exp = build_modify_expr (loc, var, TREE_TYPE (var), NOP_EXPR, loc,
@@ -295,7 +296,7 @@ fix_builtin_array_notation_fn (tree an_builtin_fn, tree *new_var)
 
   for (ii = 0; ii < rank; ii++)
     {
-      an_loop_info[ii].var = create_tmp_var (integer_type_node, NULL);
+      an_loop_info[ii].var = create_tmp_var (integer_type_node);
       an_loop_info[ii].ind_init =
 	build_modify_expr (location, an_loop_info[ii].var,
 			   TREE_TYPE (an_loop_info[ii].var), NOP_EXPR,
@@ -321,7 +322,7 @@ fix_builtin_array_notation_fn (tree an_builtin_fn, tree *new_var)
     array_ind_value = build_decl (location, VAR_DECL, NULL_TREE, 
 				  TREE_TYPE (func_parm));
   array_op0 = (*array_operand)[0];
-  if (TREE_CODE (array_op0) == INDIRECT_REF)
+  if (INDIRECT_REF_P (array_op0))
     array_op0 = TREE_OPERAND (array_op0, 0);
   switch (an_type)
     {
@@ -795,8 +796,7 @@ build_array_notation_expr (location_t location, tree lhs, tree lhs_origtype,
   for (ii = 0; ii < lhs_rank; ii++)
     if (lhs_an_info[0][ii].is_vector)
       {
-	lhs_an_loop_info[ii].var = create_tmp_var (integer_type_node,
-						   NULL);
+	lhs_an_loop_info[ii].var = create_tmp_var (integer_type_node);
 	lhs_an_loop_info[ii].ind_init = build_modify_expr
 	  (location, lhs_an_loop_info[ii].var,
 	   TREE_TYPE (lhs_an_loop_info[ii].var), NOP_EXPR,
@@ -807,8 +807,7 @@ build_array_notation_expr (location_t location, tree lhs, tree lhs_origtype,
     {
       /* When we have a polynomial, we assume that the indices are of type 
 	 integer.  */
-      rhs_an_loop_info[ii].var = create_tmp_var (integer_type_node,
-						 NULL);
+      rhs_an_loop_info[ii].var = create_tmp_var (integer_type_node);
       rhs_an_loop_info[ii].ind_init = build_modify_expr
 	(location, rhs_an_loop_info[ii].var,
 	 TREE_TYPE (rhs_an_loop_info[ii].var), NOP_EXPR,
@@ -984,7 +983,7 @@ fix_conditional_array_notations_1 (tree stmt)
   cilkplus_extract_an_triplets (array_list, list_size, rank, &an_info);
   for (ii = 0; ii < rank; ii++)
     {
-      an_loop_info[ii].var = create_tmp_var (integer_type_node, NULL);
+      an_loop_info[ii].var = create_tmp_var (integer_type_node);
       an_loop_info[ii].ind_init =
 	build_modify_expr (location, an_loop_info[ii].var,
 			   TREE_TYPE (an_loop_info[ii].var), NOP_EXPR,
@@ -1080,7 +1079,7 @@ fix_array_notation_expr (location_t location, enum tree_code code,
   loop_init = push_stmt_list ();
   for (ii = 0; ii < rank; ii++)
     {
-      an_loop_info[ii].var = create_tmp_var (integer_type_node, NULL);
+      an_loop_info[ii].var = create_tmp_var (integer_type_node);
       an_loop_info[ii].ind_init =
 	build_modify_expr (location, an_loop_info[ii].var,
 			   TREE_TYPE (an_loop_info[ii].var), NOP_EXPR,
@@ -1175,7 +1174,7 @@ fix_array_notation_call_expr (tree arg)
     }
   for (ii = 0; ii < rank; ii++)
     {
-      an_loop_info[ii].var = create_tmp_var (integer_type_node, NULL);
+      an_loop_info[ii].var = create_tmp_var (integer_type_node);
       an_loop_info[ii].ind_init =
 	build_modify_expr (location, an_loop_info[ii].var,
 			   TREE_TYPE (an_loop_info[ii].var), NOP_EXPR, location,

@@ -1,5 +1,5 @@
 /* Combining of if-expressions on trees.
-   Copyright (C) 2007-2014 Free Software Foundation, Inc.
+   Copyright (C) 2007-2015 Free Software Foundation, Inc.
    Contributed by Richard Guenther <rguenther@suse.de>
 
 This file is part of GCC.
@@ -21,27 +21,25 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
+#include "tree.h"
+#include "gimple.h"
+#include "rtl.h"
+#include "ssa.h"
 /* rtl is needed only because arm back-end requires it for
    BRANCH_COST.  */
-#include "rtl.h"
 #include "tm_p.h"
-#include "tree.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stor-layout.h"
-#include "basic-block.h"
+#include "cfganal.h"
 #include "tree-pretty-print.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
 #include "gimple-fold.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
 #include "gimplify-me.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
 #include "tree-pass.h"
 
 #ifndef LOGICAL_OP_NON_SHORT_CIRCUIT
@@ -90,11 +88,7 @@ recognize_if_then_else (basic_block cond_bb,
   t = EDGE_SUCC (cond_bb, 0);
   e = EDGE_SUCC (cond_bb, 1);
   if (!(t->flags & EDGE_TRUE_VALUE))
-    {
-      edge tmp = t;
-      t = e;
-      e = tmp;
-    }
+    std::swap (t, e);
   if (!(t->flags & EDGE_TRUE_VALUE)
       || !(e->flags & EDGE_FALSE_VALUE))
     return false;
@@ -158,12 +152,12 @@ same_phi_args_p (basic_block bb1, basic_block bb2, basic_block dest)
 {
   edge e1 = find_edge (bb1, dest);
   edge e2 = find_edge (bb2, dest);
-  gimple_stmt_iterator gsi;
-  gimple phi;
+  gphi_iterator gsi;
+  gphi *phi;
 
   for (gsi = gsi_start_phis (dest); !gsi_end_p (gsi); gsi_next (&gsi))
     {
-      phi = gsi_stmt (gsi);
+      phi = gsi.phi ();
       if (!operand_equal_p (PHI_ARG_DEF_FROM_EDGE (phi, e1),
 			    PHI_ARG_DEF_FROM_EDGE (phi, e2), 0))
         return false;
@@ -202,7 +196,7 @@ get_name_for_bit_test (tree candidate)
    Returns true if the pattern matched, false otherwise.  */
 
 static bool
-recognize_single_bit_test (gimple cond, tree *name, tree *bit, bool inv)
+recognize_single_bit_test (gcond *cond, tree *name, tree *bit, bool inv)
 {
   gimple stmt;
 
@@ -311,7 +305,7 @@ recognize_single_bit_test (gimple cond, tree *name, tree *bit, bool inv)
    Returns true if the pattern matched, false otherwise.  */
 
 static bool
-recognize_bits_test (gimple cond, tree *name, tree *bits, bool inv)
+recognize_bits_test (gcond *cond, tree *name, tree *bits, bool inv)
 {
   gimple stmt;
 
@@ -342,18 +336,21 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
 		   basic_block outer_cond_bb, bool outer_inv, bool result_inv)
 {
   gimple_stmt_iterator gsi;
-  gimple inner_cond, outer_cond;
+  gimple inner_stmt, outer_stmt;
+  gcond *inner_cond, *outer_cond;
   tree name1, name2, bit1, bit2, bits1, bits2;
 
-  inner_cond = last_stmt (inner_cond_bb);
-  if (!inner_cond
-      || gimple_code (inner_cond) != GIMPLE_COND)
+  inner_stmt = last_stmt (inner_cond_bb);
+  if (!inner_stmt
+      || gimple_code (inner_stmt) != GIMPLE_COND)
     return false;
+  inner_cond = as_a <gcond *> (inner_stmt);
 
-  outer_cond = last_stmt (outer_cond_bb);
-  if (!outer_cond
-      || gimple_code (outer_cond) != GIMPLE_COND)
+  outer_stmt = last_stmt (outer_cond_bb);
+  if (!outer_stmt
+      || gimple_code (outer_stmt) != GIMPLE_COND)
     return false;
+  outer_cond = as_a <gcond *> (outer_stmt);
 
   /* See if we test a single bit of the same name in both tests.  In
      that case remove the outer test, merging both else edges,
@@ -418,25 +415,13 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
 	;
       else if (bits1 == bits2)
 	{
-	  t = name2;
-	  name2 = bits2;
-	  bits2 = t;
-	  t = name1;
-	  name1 = bits1;
-	  bits1 = t;
+	  std::swap (name2, bits2);
+	  std::swap (name1, bits1);
 	}
       else if (name1 == bits2)
-	{
-	  t = name2;
-	  name2 = bits2;
-	  bits2 = t;
-	}
+	std::swap (name2, bits2);
       else if (bits1 == name2)
-	{
-	  t = name1;
-	  name1 = bits1;
-	  bits1 = t;
-	}
+	std::swap (name1, bits1);
       else
 	return false;
 
@@ -505,12 +490,12 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
       /* Invert comparisons if necessary (and possible).  */
       if (inner_inv)
 	inner_cond_code = invert_tree_comparison (inner_cond_code,
-	  HONOR_NANS (TYPE_MODE (TREE_TYPE (gimple_cond_lhs (inner_cond)))));
+	  HONOR_NANS (gimple_cond_lhs (inner_cond)));
       if (inner_cond_code == ERROR_MARK)
 	return false;
       if (outer_inv)
 	outer_cond_code = invert_tree_comparison (outer_cond_code,
-	  HONOR_NANS (TYPE_MODE (TREE_TYPE (gimple_cond_lhs (outer_cond)))));
+	  HONOR_NANS (gimple_cond_lhs (outer_cond)));
       if (outer_cond_code == ERROR_MARK)
 	return false;
       /* Don't return false so fast, try maybe_fold_or_comparisons?  */
@@ -780,7 +765,22 @@ pass_tree_ifcombine::execute (function *fun)
 
       if (stmt
 	  && gimple_code (stmt) == GIMPLE_COND)
-	cfg_changed |= tree_ssa_ifcombine_bb (bb);
+	if (tree_ssa_ifcombine_bb (bb))
+	  {
+	    /* Clear range info from all stmts in BB which is now executed
+	       conditional on a always true/false condition.  */
+	    for (gimple_stmt_iterator gsi = gsi_start_bb (bb);
+		 !gsi_end_p (gsi); gsi_next (&gsi))
+	      {
+		gimple stmt = gsi_stmt (gsi);
+		ssa_op_iter i;
+		tree op;
+		FOR_EACH_SSA_TREE_OPERAND (op, stmt, i, SSA_OP_DEF)
+		  reset_flow_sensitive_info (op);
+	      }
+
+	    cfg_changed |= true;
+	  }
     }
 
   free (bbs);

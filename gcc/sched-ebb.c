@@ -1,5 +1,5 @@
 /* Instruction scheduling pass.
-   Copyright (C) 1992-2014 Free Software Foundation, Inc.
+   Copyright (C) 1992-2015 Free Software Foundation, Inc.
    Contributed by Michael Tiemann (tiemann@cygnus.com) Enhanced by,
    and currently maintained by, Jim Wilson (wilson@cygnus.com)
 
@@ -22,18 +22,13 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "diagnostic-core.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "rtl.h"
+#include "df.h"
+#include "diagnostic-core.h"
 #include "tm_p.h"
-#include "hard-reg-set.h"
 #include "regs.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
 #include "profile.h"
 #include "flags.h"
 #include "insn-config.h"
@@ -41,6 +36,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "except.h"
 #include "recog.h"
 #include "params.h"
+#include "cfgrtl.h"
+#include "cfgbuild.h"
 #include "sched-int.h"
 #include "target.h"
 
@@ -178,9 +175,7 @@ begin_move_insn (rtx_insn *insn, rtx_insn *last)
 			   && BB_END (last_bb) == insn);
 
       {
-	rtx x;
-
-	x = NEXT_INSN (insn);
+	rtx_insn *x = NEXT_INSN (insn);
 	if (e)
 	  gcc_checking_assert (NOTE_P (x) || LABEL_P (x));
 	else

@@ -1,5 +1,5 @@
 /* Subroutines used for code generation on the Renesas M32R cpu.
-   Copyright (C) 1996-2014 Free Software Foundation, Inc.
+   Copyright (C) 1996-2015 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -20,38 +20,44 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "rtl.h"
+#include "df.h"
+#include "alias.h"
 #include "stor-layout.h"
 #include "varasm.h"
 #include "stringpool.h"
 #include "calls.h"
-#include "rtl.h"
 #include "regs.h"
-#include "hard-reg-set.h"
 #include "insn-config.h"
 #include "conditions.h"
 #include "output.h"
 #include "dbxout.h"
 #include "insn-attr.h"
 #include "flags.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "emit-rtl.h"
+#include "stmt.h"
 #include "expr.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
 #include "recog.h"
 #include "diagnostic-core.h"
-#include "ggc.h"
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "lcm.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "tm_p.h"
 #include "target.h"
-#include "target-def.h"
 #include "tm-constrs.h"
 #include "opts.h"
 #include "builtins.h"
+
+/* This file should be included last.  */
+#include "target-def.h"
 
 /* Array of valid operand punctuation characters.  */
 static char m32r_punct_chars[256];
@@ -69,8 +75,8 @@ static void  m32r_option_override (void);
 static void  init_reg_tables (void);
 static void  block_move_call (rtx, rtx, rtx);
 static int   m32r_is_insn (rtx);
-static bool  m32r_legitimate_address_p (enum machine_mode, rtx, bool);
-static rtx   m32r_legitimize_address (rtx, rtx, enum machine_mode);
+static bool  m32r_legitimate_address_p (machine_mode, rtx, bool);
+static rtx   m32r_legitimize_address (rtx, rtx, machine_mode);
 static bool  m32r_mode_dependent_address_p (const_rtx, addr_space_t);
 static tree  m32r_handle_model_attribute (tree *, tree, tree, int, bool *);
 static void  m32r_print_operand (FILE *, rtx, int);
@@ -88,25 +94,26 @@ static void m32r_encode_section_info (tree, rtx, int);
 static bool m32r_in_small_data_p (const_tree);
 static bool m32r_return_in_memory (const_tree, const_tree);
 static rtx m32r_function_value (const_tree, const_tree, bool);
-static rtx m32r_libcall_value (enum machine_mode, const_rtx);
+static rtx m32r_libcall_value (machine_mode, const_rtx);
 static bool m32r_function_value_regno_p (const unsigned int);
-static void m32r_setup_incoming_varargs (cumulative_args_t, enum machine_mode,
+static void m32r_setup_incoming_varargs (cumulative_args_t, machine_mode,
 					 tree, int *, int);
 static void init_idents (void);
-static bool m32r_rtx_costs (rtx, int, int, int, int *, bool speed);
-static int m32r_memory_move_cost (enum machine_mode, reg_class_t, bool);
-static bool m32r_pass_by_reference (cumulative_args_t, enum machine_mode,
+static bool m32r_rtx_costs (rtx, machine_mode, int, int, int *, bool speed);
+static int m32r_memory_move_cost (machine_mode, reg_class_t, bool);
+static bool m32r_pass_by_reference (cumulative_args_t, machine_mode,
 				    const_tree, bool);
-static int m32r_arg_partial_bytes (cumulative_args_t, enum machine_mode,
+static int m32r_arg_partial_bytes (cumulative_args_t, machine_mode,
 				   tree, bool);
-static rtx m32r_function_arg (cumulative_args_t, enum machine_mode,
+static rtx m32r_function_arg (cumulative_args_t, machine_mode,
 			      const_tree, bool);
-static void m32r_function_arg_advance (cumulative_args_t, enum machine_mode,
+static void m32r_function_arg_advance (cumulative_args_t, machine_mode,
 				       const_tree, bool);
 static bool m32r_can_eliminate (const int, const int);
 static void m32r_conditional_register_usage (void);
 static void m32r_trampoline_init (rtx, tree, rtx);
-static bool m32r_legitimate_constant_p (enum machine_mode, rtx);
+static bool m32r_legitimate_constant_p (machine_mode, rtx);
+static bool m32r_attribute_identifier (const_tree);
 
 /* M32R specific attributes.  */
 
@@ -123,6 +130,8 @@ static const struct attribute_spec m32r_attribute_table[] =
 /* Initialize the GCC target structure.  */
 #undef  TARGET_ATTRIBUTE_TABLE
 #define TARGET_ATTRIBUTE_TABLE m32r_attribute_table
+#undef  TARGET_ATTRIBUTE_TAKES_IDENTIFIER_P
+#define TARGET_ATTRIBUTE_TAKES_IDENTIFIER_P m32r_attribute_identifier
 
 #undef TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P m32r_legitimate_address_p
@@ -288,7 +297,7 @@ init_reg_tables (void)
 
   for (i = 0; i < NUM_MACHINE_MODES; i++)
     {
-      enum machine_mode m = (enum machine_mode) i;
+      machine_mode m = (machine_mode) i;
       
       switch (GET_MODE_CLASS (m))
 	{
@@ -398,6 +407,13 @@ m32r_handle_model_attribute (tree *node ATTRIBUTE_UNUSED, tree name,
 
   return NULL_TREE;
 }
+
+static bool
+m32r_attribute_identifier (const_tree name)
+{
+  return strcmp (IDENTIFIER_POINTER (name), "model") == 0
+    ||   strcmp (IDENTIFIER_POINTER (name), "__model__") == 0;
+}
 
 /* Encode section information of DECL, which is either a VAR_DECL,
    FUNCTION_DECL, STRING_CST, CONSTRUCTOR, or ???.
@@ -506,7 +522,7 @@ m32r_init_expanders (void)
 }
 
 int
-call_operand (rtx op, enum machine_mode mode)
+call_operand (rtx op, machine_mode mode)
 {
   if (!MEM_P (op))
     return 0;
@@ -517,7 +533,7 @@ call_operand (rtx op, enum machine_mode mode)
 /* Return 1 if OP is a reference to an object in .sdata/.sbss.  */
 
 int
-small_data_operand (rtx op, enum machine_mode mode ATTRIBUTE_UNUSED)
+small_data_operand (rtx op, machine_mode mode ATTRIBUTE_UNUSED)
 {
   if (! TARGET_SDATA_USE)
     return 0;
@@ -537,7 +553,7 @@ small_data_operand (rtx op, enum machine_mode mode ATTRIBUTE_UNUSED)
 /* Return 1 if OP is a symbol that can use 24-bit addressing.  */
 
 int
-addr24_operand (rtx op, enum machine_mode mode ATTRIBUTE_UNUSED)
+addr24_operand (rtx op, machine_mode mode ATTRIBUTE_UNUSED)
 {
   rtx sym;
 
@@ -571,7 +587,7 @@ addr24_operand (rtx op, enum machine_mode mode ATTRIBUTE_UNUSED)
 /* Return 1 if OP is a symbol that needs 32-bit addressing.  */
 
 int
-addr32_operand (rtx op, enum machine_mode mode)
+addr32_operand (rtx op, machine_mode mode)
 {
   rtx sym;
 
@@ -596,7 +612,7 @@ addr32_operand (rtx op, enum machine_mode mode)
 /* Return 1 if OP is a function that can be called with the `bl' insn.  */
 
 int
-call26_operand (rtx op, enum machine_mode mode ATTRIBUTE_UNUSED)
+call26_operand (rtx op, machine_mode mode ATTRIBUTE_UNUSED)
 {
   if (flag_pic)
     return 1;
@@ -650,7 +666,7 @@ easy_df_const (rtx op)
    This is used in insn length calcs.  */
 
 int
-memreg_operand (rtx op, enum machine_mode mode ATTRIBUTE_UNUSED)
+memreg_operand (rtx op, machine_mode mode ATTRIBUTE_UNUSED)
 {
   return MEM_P (op) && REG_P (XEXP (op, 0));
 }
@@ -659,7 +675,7 @@ memreg_operand (rtx op, enum machine_mode mode ATTRIBUTE_UNUSED)
 
 static bool
 m32r_pass_by_reference (cumulative_args_t ca ATTRIBUTE_UNUSED,
-			enum machine_mode mode, const_tree type,
+			machine_mode mode, const_tree type,
 			bool named ATTRIBUTE_UNUSED)
 {
   int size;
@@ -884,7 +900,7 @@ gen_compare (enum rtx_code code, rtx x, rtx y, int need_compare)
 bool
 gen_cond_store (enum rtx_code code, rtx op0, rtx op1, rtx op2)
 {
-  enum machine_mode mode = GET_MODE (op0);
+  machine_mode mode = GET_MODE (op0);
 
   gcc_assert (mode == SImode);
   switch (code)
@@ -1031,7 +1047,7 @@ gen_cond_store (enum rtx_code code, rtx op0, rtx op1, rtx op2)
 rtx
 gen_split_move_double (rtx operands[])
 {
-  enum machine_mode mode = GET_MODE (operands[0]);
+  machine_mode mode = GET_MODE (operands[0]);
   rtx dest = operands[0];
   rtx src  = operands[1];
   rtx val;
@@ -1059,12 +1075,10 @@ gen_split_move_double (rtx operands[])
 	  /* We normally copy the low-numbered register first.  However, if
 	     the first register operand 0 is the same as the second register of
 	     operand 1, we must copy in the opposite order.  */
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  operand_subword (dest, reverse, TRUE, mode),
+	  emit_insn (gen_rtx_SET (operand_subword (dest, reverse, TRUE, mode),
 				  operand_subword (src,  reverse, TRUE, mode)));
 
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  operand_subword (dest, !reverse, TRUE, mode),
+	  emit_insn (gen_rtx_SET (operand_subword (dest, !reverse, TRUE, mode),
 				  operand_subword (src,  !reverse, TRUE, mode)));
 	}
 
@@ -1073,12 +1087,10 @@ gen_split_move_double (rtx operands[])
 	{
 	  rtx words[2];
 	  split_double (src, &words[0], &words[1]);
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  operand_subword (dest, 0, TRUE, mode),
+	  emit_insn (gen_rtx_SET (operand_subword (dest, 0, TRUE, mode),
 				  words[0]));
 
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  operand_subword (dest, 1, TRUE, mode),
+	  emit_insn (gen_rtx_SET (operand_subword (dest, 1, TRUE, mode),
 				  words[1]));
 	}
 
@@ -1087,8 +1099,7 @@ gen_split_move_double (rtx operands[])
 	{
 	  /* If the high-address word is used in the address, we must load it
 	     last.  Otherwise, load it first.  */
-	  int reverse
-	    = (refers_to_regno_p (dregno, dregno + 1, XEXP (src, 0), 0) != 0);
+	  int reverse = refers_to_regno_p (dregno, XEXP (src, 0));
 
 	  /* We used to optimize loads from single registers as
 
@@ -1101,13 +1112,11 @@ gen_split_move_double (rtx operands[])
 		ld r1,r3+; ld r2,r3; addi r3,-4
 
 	     which saves 2 bytes and doesn't force longword alignment.  */
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  operand_subword (dest, reverse, TRUE, mode),
+	  emit_insn (gen_rtx_SET (operand_subword (dest, reverse, TRUE, mode),
 				  adjust_address (src, SImode,
 						  reverse * UNITS_PER_WORD)));
 
-	  emit_insn (gen_rtx_SET (VOIDmode,
-				  operand_subword (dest, !reverse, TRUE, mode),
+	  emit_insn (gen_rtx_SET (operand_subword (dest, !reverse, TRUE, mode),
 				  adjust_address (src, SImode,
 						  !reverse * UNITS_PER_WORD)));
 	}
@@ -1129,12 +1138,10 @@ gen_split_move_double (rtx operands[])
      which saves 2 bytes and doesn't force longword alignment.  */
   else if (MEM_P (dest) && REG_P (src))
     {
-      emit_insn (gen_rtx_SET (VOIDmode,
-			      adjust_address (dest, SImode, 0),
+      emit_insn (gen_rtx_SET (adjust_address (dest, SImode, 0),
 			      operand_subword (src, 0, TRUE, mode)));
 
-      emit_insn (gen_rtx_SET (VOIDmode,
-			      adjust_address (dest, SImode, UNITS_PER_WORD),
+      emit_insn (gen_rtx_SET (adjust_address (dest, SImode, UNITS_PER_WORD),
 			      operand_subword (src, 1, TRUE, mode)));
     }
 
@@ -1148,7 +1155,7 @@ gen_split_move_double (rtx operands[])
 
 
 static int
-m32r_arg_partial_bytes (cumulative_args_t cum_v, enum machine_mode mode,
+m32r_arg_partial_bytes (cumulative_args_t cum_v, machine_mode mode,
 			tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -1208,7 +1215,7 @@ m32r_arg_partial_bytes (cumulative_args_t cum_v, enum machine_mode mode,
    and the rest are pushed.  */
 
 static rtx
-m32r_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
+m32r_function_arg (cumulative_args_t cum_v, machine_mode mode,
 		   const_tree type ATTRIBUTE_UNUSED,
 		   bool named ATTRIBUTE_UNUSED)
 {
@@ -1224,7 +1231,7 @@ m32r_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
    (TYPE is null for libcalls where that information may not be available.)  */
 
 static void
-m32r_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
+m32r_function_arg_advance (cumulative_args_t cum_v, machine_mode mode,
 			   const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -1256,7 +1263,7 @@ m32r_function_value (const_tree valtype,
 /* Worker function for TARGET_LIBCALL_VALUE.  */
 
 static rtx
-m32r_libcall_value (enum machine_mode mode,
+m32r_libcall_value (machine_mode mode,
 		const_rtx fun ATTRIBUTE_UNUSED)
 {
   return gen_rtx_REG (mode, 0);
@@ -1280,7 +1287,7 @@ m32r_function_value_regno_p (const unsigned int regno)
    and mode MODE, and we rely on this fact.  */
 
 static void
-m32r_setup_incoming_varargs (cumulative_args_t cum, enum machine_mode mode,
+m32r_setup_incoming_varargs (cumulative_args_t cum, machine_mode mode,
 			     tree type, int *pretend_size, int no_rtl)
 {
   int first_anon_arg;
@@ -1354,7 +1361,7 @@ m32r_issue_rate (void)
    ??? Is that the right way to look at it?  */
 
 static int
-m32r_memory_move_cost (enum machine_mode mode,
+m32r_memory_move_cost (machine_mode mode,
 		       reg_class_t rclass ATTRIBUTE_UNUSED,
 		       bool in ATTRIBUTE_UNUSED)
 {
@@ -1365,10 +1372,13 @@ m32r_memory_move_cost (enum machine_mode mode,
 }
 
 static bool
-m32r_rtx_costs (rtx x, int code, int outer_code ATTRIBUTE_UNUSED,
+m32r_rtx_costs (rtx x, machine_mode mode ATTRIBUTE_UNUSED,
+		int outer_code ATTRIBUTE_UNUSED,
 		int opno ATTRIBUTE_UNUSED, int *total,
 		bool speed ATTRIBUTE_UNUSED)
 {
+  int code = GET_CODE (x);
+
   switch (code)
     {
       /* Small integers are as cheap as registers.  4 byte values can be
@@ -1663,6 +1673,9 @@ m32r_expand_prologue (void)
 
   if (! current_frame_info.initialized)
     m32r_compute_frame_size (get_frame_size ());
+
+  if (flag_stack_usage_info)
+    current_function_static_stack_size = current_frame_info.total_size;
 
   gmask = current_frame_info.gmask;
 
@@ -2009,7 +2022,7 @@ m32r_legitimize_pic_address (rtx orig, rtx reg)
 
 static rtx
 m32r_legitimize_address (rtx x, rtx orig_x ATTRIBUTE_UNUSED,
-			 enum machine_mode mode ATTRIBUTE_UNUSED)
+			 machine_mode mode ATTRIBUTE_UNUSED)
 {
   if (flag_pic)
     return m32r_legitimize_pic_address (x, NULL_RTX);
@@ -2829,7 +2842,7 @@ m32r_rtx_ok_for_offset_p (const_rtx x)
 }
 
 static inline bool
-m32r_legitimate_offset_addres_p (enum machine_mode mode ATTRIBUTE_UNUSED,
+m32r_legitimate_offset_addres_p (machine_mode mode ATTRIBUTE_UNUSED,
 				 const_rtx x, bool strict)
 {
   if (GET_CODE (x) == PLUS
@@ -2844,7 +2857,7 @@ m32r_legitimate_offset_addres_p (enum machine_mode mode ATTRIBUTE_UNUSED,
    since more than one instruction will be required.  */
 
 static inline bool
-m32r_legitimate_lo_sum_addres_p (enum machine_mode mode, const_rtx x,
+m32r_legitimate_lo_sum_addres_p (machine_mode mode, const_rtx x,
 				 bool strict)
 {
   if (GET_CODE (x) == LO_SUM
@@ -2859,7 +2872,7 @@ m32r_legitimate_lo_sum_addres_p (enum machine_mode mode, const_rtx x,
 /* Is this a load and increment operation.  */
 
 static inline bool
-m32r_load_postinc_p (enum machine_mode mode, const_rtx x, bool strict)
+m32r_load_postinc_p (machine_mode mode, const_rtx x, bool strict)
 {
   if ((mode == SImode || mode == SFmode)
       && GET_CODE (x) == POST_INC
@@ -2873,7 +2886,7 @@ m32r_load_postinc_p (enum machine_mode mode, const_rtx x, bool strict)
 /* Is this an increment/decrement and store operation.  */
 
 static inline bool
-m32r_store_preinc_predec_p (enum machine_mode mode, const_rtx x, bool strict)
+m32r_store_preinc_predec_p (machine_mode mode, const_rtx x, bool strict)
 {
   if ((mode == SImode || mode == SFmode)
       && (GET_CODE (x) == PRE_INC || GET_CODE (x) == PRE_DEC)
@@ -2887,7 +2900,7 @@ m32r_store_preinc_predec_p (enum machine_mode mode, const_rtx x, bool strict)
 /* Implement  TARGET_LEGITIMATE_ADDRESS_P.  */
 
 static bool
-m32r_legitimate_address_p (enum machine_mode mode, rtx x, bool strict)
+m32r_legitimate_address_p (machine_mode mode, rtx x, bool strict)
 {
   if (m32r_rtx_ok_for_base_p (x, strict)
       || m32r_legitimate_offset_addres_p (mode, x, strict)
@@ -2917,7 +2930,7 @@ m32r_conditional_register_usage (void)
    constant to memory if they can't handle them.  */
 
 static bool
-m32r_legitimate_constant_p (enum machine_mode mode ATTRIBUTE_UNUSED, rtx x)
+m32r_legitimate_constant_p (machine_mode mode ATTRIBUTE_UNUSED, rtx x)
 {
   return !(GET_CODE (x) == CONST
 	   && GET_CODE (XEXP (x, 0)) == PLUS

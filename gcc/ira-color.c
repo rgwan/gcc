@@ -1,5 +1,5 @@
 /* IRA allocation based on graph coloring.
-   Copyright (C) 2006-2014 Free Software Foundation, Inc.
+   Copyright (C) 2006-2015 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -21,22 +21,31 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "predict.h"
+#include "tree.h"
 #include "rtl.h"
+#include "df.h"
 #include "tm_p.h"
 #include "target.h"
 #include "regs.h"
 #include "flags.h"
-#include "sbitmap.h"
-#include "bitmap.h"
-#include "hash-table.h"
-#include "hard-reg-set.h"
-#include "basic-block.h"
+#include "alias.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
 #include "diagnostic-core.h"
 #include "reload.h"
 #include "params.h"
-#include "df.h"
+#include "cfgloop.h"
+#include "ira.h"
+#include "alloc-pool.h"
 #include "ira-int.h"
 
 typedef struct allocno_hard_regs *allocno_hard_regs_t;
@@ -199,24 +208,24 @@ static vec<ira_allocno_t> allocno_stack_vec;
 /* Vector of unique allocno hard registers.  */
 static vec<allocno_hard_regs_t> allocno_hard_regs_vec;
 
-struct allocno_hard_regs_hasher : typed_noop_remove <allocno_hard_regs>
+struct allocno_hard_regs_hasher : nofree_ptr_hash <allocno_hard_regs>
 {
-  typedef allocno_hard_regs value_type;
-  typedef allocno_hard_regs compare_type;
-  static inline hashval_t hash (const value_type *);
-  static inline bool equal (const value_type *, const compare_type *);
+  static inline hashval_t hash (const allocno_hard_regs *);
+  static inline bool equal (const allocno_hard_regs *,
+			    const allocno_hard_regs *);
 };
 
 /* Returns hash value for allocno hard registers V.  */
 inline hashval_t
-allocno_hard_regs_hasher::hash (const value_type *hv)
+allocno_hard_regs_hasher::hash (const allocno_hard_regs *hv)
 {
   return iterative_hash (&hv->set, sizeof (HARD_REG_SET), 0);
 }
 
 /* Compares allocno hard registers V1 and V2.  */
 inline bool
-allocno_hard_regs_hasher::equal (const value_type *hv1, const compare_type *hv2)
+allocno_hard_regs_hasher::equal (const allocno_hard_regs *hv1,
+				 const allocno_hard_regs *hv2)
 {
   return hard_reg_set_equal_p (hv1->set, hv2->set);
 }
@@ -521,7 +530,7 @@ print_hard_regs_subforest (FILE *f, allocno_hard_regs_node_t roots,
 	fprintf (f, " ");
       fprintf (f, "%d:(", node->preorder_num);
       print_hard_reg_set (f, node->hard_regs->set, false);
-      fprintf (f, ")@%"PRId64"\n", node->hard_regs->cost);
+      fprintf (f, ")@%" PRId64"\n", node->hard_regs->cost);
       print_hard_regs_subforest (f, node->first, level + 1);
     }
 }
@@ -832,7 +841,6 @@ setup_left_conflict_sizes_p (ira_allocno_t a)
   HARD_REG_SET node_set;
 
   nobj = ALLOCNO_NUM_OBJECTS (a);
-  conflict_size = 0;
   data = ALLOCNO_COLOR_DATA (a);
   subnodes = allocno_hard_regs_subnodes + data->hard_regs_subnodes_start;
   COPY_HARD_REG_SET (profitable_hard_regs, data->profitable_hard_regs);
@@ -913,7 +921,7 @@ setup_left_conflict_sizes_p (ira_allocno_t a)
       subnodes[i].left_conflict_subnodes_size = 0;
     }
   start = node_preorder_num * allocno_hard_regs_nodes_num;
-  for (i = data->hard_regs_subnodes_num - 1; i >= 0; i--)
+  for (i = data->hard_regs_subnodes_num - 1; i > 0; i--)
     {
       int size, parent_i;
       allocno_hard_regs_node_t parent;
@@ -923,19 +931,17 @@ setup_left_conflict_sizes_p (ira_allocno_t a)
 		     - subnodes[i].left_conflict_subnodes_size,
 		     subnodes[i].left_conflict_size));
       parent = allocno_hard_regs_nodes[i + node_preorder_num]->parent;
-      if (parent == NULL)
-	continue;
+      gcc_checking_assert(parent);
       parent_i
 	= allocno_hard_regs_subnode_index[start + parent->preorder_num];
-      if (parent_i < 0)
-	continue;
+      gcc_checking_assert(parent_i >= 0);
       subnodes[parent_i].left_conflict_subnodes_size += size;
     }
   left_conflict_subnodes_size = subnodes[0].left_conflict_subnodes_size;
   conflict_size
-    += (left_conflict_subnodes_size
-	+ MIN (subnodes[0].max_node_impact - left_conflict_subnodes_size,
-	       subnodes[0].left_conflict_size));
+    = (left_conflict_subnodes_size
+       + MIN (subnodes[0].max_node_impact - left_conflict_subnodes_size,
+	      subnodes[0].left_conflict_size));
   conflict_size += ira_reg_class_max_nregs[ALLOCNO_CLASS (a)][ALLOCNO_MODE (a)];
   data->colorable_p = conflict_size <= data->available_regs_num;
   return data->colorable_p;
@@ -1026,7 +1032,7 @@ setup_profitable_hard_regs (void)
   ira_allocno_t a;
   bitmap_iterator bi;
   enum reg_class aclass;
-  enum machine_mode mode;
+  machine_mode mode;
   allocno_color_data_t data;
 
   /* Initial set up from allocno classes and explicitly conflicting
@@ -1038,7 +1044,10 @@ setup_profitable_hard_regs (void)
 	continue;
       data = ALLOCNO_COLOR_DATA (a);
       if (ALLOCNO_UPDATED_HARD_REG_COSTS (a) == NULL
-	  && ALLOCNO_CLASS_COST (a) > ALLOCNO_MEMORY_COST (a))
+	  && ALLOCNO_CLASS_COST (a) > ALLOCNO_MEMORY_COST (a)
+	  /* Do not empty profitable regs for static chain pointer
+	     pseudo when non-local goto is used.  */
+	  && ! non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a)))
 	CLEAR_HARD_REG_SET (data->profitable_hard_regs);
       else
 	{
@@ -1120,7 +1129,10 @@ setup_profitable_hard_regs (void)
 	      if (! TEST_HARD_REG_BIT (data->profitable_hard_regs,
 				       hard_regno))
 		continue;
-	      if (ALLOCNO_UPDATED_MEMORY_COST (a) < costs[j])
+	      if (ALLOCNO_UPDATED_MEMORY_COST (a) < costs[j]
+		  /* Do not remove HARD_REGNO for static chain pointer
+		     pseudo when non-local goto is used.  */
+		  && ! non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a)))
 		CLEAR_HARD_REG_BIT (data->profitable_hard_regs,
 				    hard_regno);
 	      else if (min_cost > costs[j])
@@ -1128,7 +1140,10 @@ setup_profitable_hard_regs (void)
 	    }
 	}
       else if (ALLOCNO_UPDATED_MEMORY_COST (a)
-	       < ALLOCNO_UPDATED_CLASS_COST (a))
+	       < ALLOCNO_UPDATED_CLASS_COST (a)
+	       /* Do not empty profitable regs for static chain
+		  pointer pseudo when non-local goto is used.  */
+	       && ! non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a)))
 	CLEAR_HARD_REG_SET (data->profitable_hard_regs);
       if (ALLOCNO_UPDATED_CLASS_COST (a) > min_cost)
 	ALLOCNO_UPDATED_CLASS_COST (a) = min_cost;
@@ -1141,16 +1156,8 @@ setup_profitable_hard_regs (void)
    allocnos.  */
 
 /* Pool for update cost records.  */
-static alloc_pool update_cost_record_pool;
-
-/* Initiate update cost records.  */
-static void
-init_update_cost_records (void)
-{
-  update_cost_record_pool
-    = create_alloc_pool ("update cost records",
-			 sizeof (struct update_cost_record), 100);
-}
+static object_allocator<update_cost_record> update_cost_record_pool
+  ("update cost records", 100);
 
 /* Return new update cost record with given params.  */
 static struct update_cost_record *
@@ -1159,7 +1166,7 @@ get_update_cost_record (int hard_regno, int divisor,
 {
   struct update_cost_record *record;
 
-  record = (struct update_cost_record *) pool_alloc (update_cost_record_pool);
+  record = update_cost_record_pool.allocate ();
   record->hard_regno = hard_regno;
   record->divisor = divisor;
   record->next = next;
@@ -1175,7 +1182,7 @@ free_update_cost_record_list (struct update_cost_record *list)
   while (list != NULL)
     {
       next = list->next;
-      pool_free (update_cost_record_pool, list);
+      update_cost_record_pool.remove (list);
       list = next;
     }
 }
@@ -1184,7 +1191,7 @@ free_update_cost_record_list (struct update_cost_record *list)
 static void
 finish_update_cost_records (void)
 {
-  free_alloc_pool (update_cost_record_pool);
+  update_cost_record_pool.release ();
 }
 
 /* Array whose element value is TRUE if the corresponding hard
@@ -1239,7 +1246,6 @@ initiate_cost_update (void)
     = (struct update_cost_queue_elem *) ira_allocate (size);
   memset (update_cost_queue_elems, 0, size);
   update_cost_check = 0;
-  init_update_cost_records ();
 }
 
 /* Deallocate data used by function update_costs_from_copies.  */
@@ -1337,7 +1343,7 @@ update_costs_from_allocno (ira_allocno_t allocno, int hard_regno,
 			   int divisor, bool decr_p, bool record_p)
 {
   int cost, update_cost;
-  enum machine_mode mode;
+  machine_mode mode;
   enum reg_class rclass, aclass;
   ira_allocno_t another_allocno, from = NULL;
   ira_copy_t cp, next_cp;
@@ -1568,7 +1574,7 @@ check_hard_reg_p (ira_allocno_t a, int hard_regno,
 {
   int j, nwords, nregs;
   enum reg_class aclass;
-  enum machine_mode mode;
+  machine_mode mode;
 
   aclass = ALLOCNO_CLASS (a);
   mode = ALLOCNO_MODE (a);
@@ -1606,7 +1612,7 @@ check_hard_reg_p (ira_allocno_t a, int hard_regno,
    function prologue/epilogue if we allocate HARD_REGNO to hold value
    of MODE.  */
 static int
-calculate_saved_nregs (int hard_regno, enum machine_mode mode)
+calculate_saved_nregs (int hard_regno, machine_mode mode)
 {
   int i;
   int nregs = 0;
@@ -1651,7 +1657,7 @@ assign_hard_reg (ira_allocno_t a, bool retry_p)
   int cost, mem_cost, min_cost, full_cost, min_full_cost, nwords, word;
   int *a_costs;
   enum reg_class aclass;
-  enum machine_mode mode;
+  machine_mode mode;
   static int costs[FIRST_PSEUDO_REGISTER], full_costs[FIRST_PSEUDO_REGISTER];
   int saved_nregs;
   enum reg_class rclass;
@@ -1714,15 +1720,22 @@ assign_hard_reg (ira_allocno_t a, bool retry_p)
 	  /* Reload can give another class so we need to check all
 	     allocnos.  */
 	  if (!retry_p
-	      && (!bitmap_bit_p (consideration_allocno_bitmap,
-				 ALLOCNO_NUM (conflict_a))
-		  || ((!ALLOCNO_ASSIGNED_P (conflict_a)
-		       || ALLOCNO_HARD_REGNO (conflict_a) < 0)
-		      && !(hard_reg_set_intersect_p
-			   (profitable_hard_regs,
-			    ALLOCNO_COLOR_DATA
-			    (conflict_a)->profitable_hard_regs)))))
-	    continue;
+	      && ((!ALLOCNO_ASSIGNED_P (conflict_a)
+		   || ALLOCNO_HARD_REGNO (conflict_a) < 0)
+		  && !(hard_reg_set_intersect_p
+		       (profitable_hard_regs,
+			ALLOCNO_COLOR_DATA
+			(conflict_a)->profitable_hard_regs))))
+	    {
+	      /* All conflict allocnos are in consideration bitmap
+		 when retry_p is false.  It might change in future and
+		 if it happens the assert will be broken.  It means
+		 the code should be modified for the new
+		 assumptions.  */
+	      ira_assert (bitmap_bit_p (consideration_allocno_bitmap,
+					ALLOCNO_NUM (conflict_a)));
+	      continue;
+	    }
 	  conflict_aclass = ALLOCNO_CLASS (conflict_a);
 	  ira_assert (ira_reg_classes_intersect_p
 		      [aclass][conflict_aclass]);
@@ -1850,7 +1863,10 @@ assign_hard_reg (ira_allocno_t a, bool retry_p)
 	  ira_assert (hard_regno >= 0);
 	}
     }
-  if (min_full_cost > mem_cost)
+  if (min_full_cost > mem_cost
+      /* Do not spill static chain pointer pseudo when non-local goto
+	 is used.  */
+      && ! non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a)))
     {
       if (! retry_p && internal_flag_ira_verbose > 3 && ira_dump_file != NULL)
 	fprintf (ira_dump_file, "(memory is more profitable %d vs %d) ",
@@ -2435,7 +2451,7 @@ static int
 calculate_allocno_spill_cost (ira_allocno_t a)
 {
   int regno, cost;
-  enum machine_mode mode;
+  machine_mode mode;
   enum reg_class rclass;
   ira_allocno_t parent_allocno;
   ira_loop_tree_node_t parent_node, loop_node;
@@ -2476,6 +2492,12 @@ allocno_spill_priority_compare (ira_allocno_t a1, ira_allocno_t a2)
 {
   int pri1, pri2, diff;
 
+  /* Avoid spilling static chain pointer pseudo when non-local goto is
+     used.  */
+  if (non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a1)))
+    return 1;
+  else if (non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a2)))
+    return -1;
   if (ALLOCNO_BAD_SPILL_P (a1) && ! ALLOCNO_BAD_SPILL_P (a2))
     return 1;
   if (ALLOCNO_BAD_SPILL_P (a2) && ! ALLOCNO_BAD_SPILL_P (a1))
@@ -2721,13 +2743,18 @@ improve_allocation (void)
   int check, spill_cost, min_cost, nregs, conflict_nregs, r, best;
   bool try_p;
   enum reg_class aclass;
-  enum machine_mode mode;
+  machine_mode mode;
   int *allocno_costs;
   int costs[FIRST_PSEUDO_REGISTER];
   HARD_REG_SET conflicting_regs[2], profitable_hard_regs;
   ira_allocno_t a;
   bitmap_iterator bi;
 
+  /* Don't bother to optimize the code with static chain pointer and
+     non-local goto in order not to spill the chain pointer
+     pseudo.  */
+  if (cfun->static_chain_decl && crtl->has_nonlocal_goto)
+    return;
   /* Clear counts used to process conflicting allocnos only once for
      each allocno.  */
   EXECUTE_IF_SET_IN_BITMAP (coloring_allocno_bitmap, 0, i, bi)
@@ -2934,6 +2961,12 @@ allocno_priority_compare_func (const void *v1p, const void *v2p)
   ira_allocno_t a2 = *(const ira_allocno_t *) v2p;
   int pri1, pri2;
 
+  /* Assign hard reg to static chain pointer pseudo first when
+     non-local goto is used.  */
+  if (non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a1)))
+    return 1;
+  else if (non_spilled_static_chain_regno_p (ALLOCNO_REGNO (a2)))
+    return -1;
   pri1 = allocno_priorities[ALLOCNO_NUM (a1)];
   pri2 = allocno_priorities[ALLOCNO_NUM (a2)];
   if (pri2 != pri1)
@@ -3145,7 +3178,7 @@ color_pass (ira_loop_tree_node_t loop_tree_node)
   int cost, exit_freq, enter_freq;
   unsigned int j;
   bitmap_iterator bi;
-  enum machine_mode mode;
+  machine_mode mode;
   enum reg_class rclass, aclass, pclass;
   ira_allocno_t a, subloop_allocno;
   ira_loop_tree_node_t subloop_node;
@@ -3249,7 +3282,11 @@ color_pass (ira_loop_tree_node_t loop_tree_node)
 	       && (loop_tree_node->reg_pressure[pclass]
 		   <= ira_class_hard_regs_num[pclass]))
 	      || (pic_offset_table_rtx != NULL
-		  && regno == (int) REGNO (pic_offset_table_rtx)))
+		  && regno == (int) REGNO (pic_offset_table_rtx))
+	      /* Avoid overlapped multi-registers. Moves between them
+		 might result in wrong code generation.  */
+	      || (hard_regno >= 0
+		  && ira_reg_class_max_nregs[pclass][mode] > 1))
 	    {
 	      if (! ALLOCNO_ASSIGNED_P (subloop_allocno))
 		{
@@ -3347,7 +3384,7 @@ move_spill_restore (void)
   int cost, regno, hard_regno, hard_regno2, index;
   bool changed_p;
   int enter_freq, exit_freq;
-  enum machine_mode mode;
+  machine_mode mode;
   enum reg_class rclass;
   ira_allocno_t a, parent_allocno, subloop_allocno;
   ira_loop_tree_node_t parent, loop_node, subloop_node;
@@ -3371,7 +3408,10 @@ move_spill_restore (void)
 		 by copy although the allocno will not get memory
 		 slot.  */
 	      || ira_equiv_no_lvalue_p (regno)
-	      || !bitmap_bit_p (loop_node->border_allocnos, ALLOCNO_NUM (a)))
+	      || !bitmap_bit_p (loop_node->border_allocnos, ALLOCNO_NUM (a))
+	      /* Do not spill static chain pointer pseudo when
+		 non-local goto is used.  */
+	      || non_spilled_static_chain_regno_p (regno))
 	    continue;
 	  mode = ALLOCNO_MODE (a);
 	  rclass = ALLOCNO_CLASS (a);
@@ -3460,7 +3500,7 @@ static void
 update_curr_costs (ira_allocno_t a)
 {
   int i, hard_regno, cost;
-  enum machine_mode mode;
+  machine_mode mode;
   enum reg_class aclass, rclass;
   ira_allocno_t another_a;
   ira_copy_t cp, next_cp;
@@ -3824,14 +3864,6 @@ coalesced_pseudo_reg_freq_compare (const void *v1p, const void *v2p)
 /* Widest width in which each pseudo reg is referred to (via subreg).
    It is used for sorting pseudo registers.  */
 static unsigned int *regno_max_ref_width;
-
-/* Redefine STACK_GROWS_DOWNWARD in terms of 0 or 1.  */
-#ifdef STACK_GROWS_DOWNWARD
-# undef STACK_GROWS_DOWNWARD
-# define STACK_GROWS_DOWNWARD 1
-#else
-# define STACK_GROWS_DOWNWARD 0
-#endif
 
 /* Sort pseudos according their slot numbers (putting ones with
   smaller numbers first, or last when the frame pointer is not
@@ -4571,7 +4603,7 @@ ira_mark_new_stack_slot (rtx x, int regno, unsigned int total_size)
    CALL_USED_COUNT), and the first hard regno occupied by the
    pseudo-registers (through FIRST_HARD_REGNO).  */
 static int
-calculate_spill_cost (int *regnos, rtx in, rtx out, rtx insn,
+calculate_spill_cost (int *regnos, rtx in, rtx out, rtx_insn *insn,
 		      int *excess_pressure_live_length,
 		      int *nrefs, int *call_used_count, int *first_hard_regno)
 {
@@ -4632,7 +4664,7 @@ calculate_spill_cost (int *regnos, rtx in, rtx out, rtx insn,
    decisions.  */
 bool
 ira_better_spill_reload_regno_p (int *regnos, int *other_regnos,
-				 rtx in, rtx out, rtx insn)
+				 rtx in, rtx out, rtx_insn *insn)
 {
   int cost, other_cost;
   int length, other_length;
@@ -4723,7 +4755,7 @@ fast_allocation (void)
   bool no_stack_reg_p;
 #endif
   enum reg_class aclass;
-  enum machine_mode mode;
+  machine_mode mode;
   ira_allocno_t a;
   ira_allocno_iterator ai;
   live_range_t r;

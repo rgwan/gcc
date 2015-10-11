@@ -1,5 +1,5 @@
 /* Subroutines used for calculate rtx costs of Andes NDS32 cpu for GNU compiler
-   Copyright (C) 2012-2014 Free Software Foundation, Inc.
+   Copyright (C) 2012-2015 Free Software Foundation, Inc.
    Contributed by Andes Technology Corporation.
 
    This file is part of GCC.
@@ -23,14 +23,16 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "rtl.h"
+#include "df.h"
+#include "alias.h"
 #include "stor-layout.h"
 #include "varasm.h"
 #include "calls.h"
-#include "rtl.h"
 #include "regs.h"
-#include "hard-reg-set.h"
 #include "insn-config.h"	/* Required by recog.h.  */
 #include "conditions.h"
 #include "output.h"
@@ -38,35 +40,39 @@
 #include "insn-codes.h"		/* For CODE_FOR_xxx.  */
 #include "reload.h"		/* For push_reload().  */
 #include "flags.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "emit-rtl.h"
+#include "stmt.h"
 #include "expr.h"
 #include "recog.h"
 #include "diagnostic-core.h"
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "lcm.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "tm_p.h"
 #include "tm-constrs.h"
 #include "optabs.h"		/* For GEN_FCN.  */
 #include "target.h"
-#include "target-def.h"
 #include "langhooks.h"		/* For add_builtin_function().  */
-#include "ggc.h"
 #include "builtins.h"
 
 /* ------------------------------------------------------------------------ */
 
 bool
 nds32_rtx_costs_impl (rtx x,
-		      int code,
+		      machine_mode mode ATTRIBUTE_UNUSED,
 		      int outer_code,
 		      int opno ATTRIBUTE_UNUSED,
 		      int *total,
 		      bool speed)
 {
+  int code = GET_CODE (x);
+
   /* According to 'speed', goto suitable cost model section.  */
   if (speed)
     goto performance_cost;
@@ -195,7 +201,7 @@ size_cost:
 
 int
 nds32_address_cost_impl (rtx address,
-			 enum machine_mode mode ATTRIBUTE_UNUSED,
+			 machine_mode mode ATTRIBUTE_UNUSED,
 			 addr_space_t as ATTRIBUTE_UNUSED,
 			 bool speed)
 {

@@ -1,5 +1,5 @@
 /* { dg-do run } */
-/* { dg-options "-O2 -fgraphite-identity -fgraphite-code-generator=isl" } */
+/* { dg-options "-O2 -fgraphite-identity" } */
 
 int st = 1;
 static void __attribute__((noinline))
@@ -28,7 +28,7 @@ extern void abort ();
 int
 main (void)
 {
-  int a[50];
+  int a[51]; /* NB This size allows foo's first iteration to write to a[50].  */
   foo (a, 50);
   int res = array_sum (a);
   if (res != 49)

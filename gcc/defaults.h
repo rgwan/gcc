@@ -1,5 +1,5 @@
 /* Definitions of various defaults for tm.h macros.
-   Copyright (C) 1992-2014 Free Software Foundation, Inc.
+   Copyright (C) 1992-2015 Free Software Foundation, Inc.
    Contributed by Ron Guilmette (rfg@monkeys.com)
 
 This file is part of GCC.
@@ -123,7 +123,7 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
     {									\
       fprintf ((FILE), "\t%s\t", TLS_COMMON_ASM_OP);			\
       assemble_name ((FILE), (NAME));					\
-      fprintf ((FILE), ","HOST_WIDE_INT_PRINT_UNSIGNED",%u\n",		\
+      fprintf ((FILE), "," HOST_WIDE_INT_PRINT_UNSIGNED",%u\n",		\
 	       (SIZE), DECL_ALIGN (DECL) / BITS_PER_UNIT);		\
     }									\
   while (0)
@@ -377,6 +377,21 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #endif
 #endif
 
+/* Provide defaults for stuff that may not be defined when using
+   sjlj exceptions.  */
+#ifndef EH_RETURN_DATA_REGNO
+#define EH_RETURN_DATA_REGNO(N) INVALID_REGNUM
+#endif
+
+/* Offset between the eh handler address and entry in eh tables.  */
+#ifndef RETURN_ADDR_OFFSET
+#define RETURN_ADDR_OFFSET 0
+#endif
+
+#ifndef MASK_RETURN_ADDR
+#define MASK_RETURN_ADDR NULL_RTX
+#endif
+
 /* If we have named section and we support weak symbols, then use the
    .jcr section for recording java classes which need to be registered
    at program start-up time.  */
@@ -436,6 +451,11 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
    By default, we just provide columns for all registers.  */
 #ifndef DWARF_FRAME_REGNUM
 #define DWARF_FRAME_REGNUM(REG) DBX_REGISTER_NUMBER (REG)
+#endif
+
+/* The mapping from dwarf CFA reg number to internal dwarf reg numbers.  */
+#ifndef DWARF_REG_TO_UNWIND_COLUMN
+#define DWARF_REG_TO_UNWIND_COLUMN(REGNO) (REGNO)
 #endif
 
 /* Map register numbers held in the call frame info that gcc has
@@ -912,7 +932,7 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #elif defined SDB_DEBUGGING_INFO
 #define PREFERRED_DEBUGGING_TYPE SDB_DEBUG
 
-#elif defined DWARF2_DEBUGGING_INFO
+#elif defined DWARF2_DEBUGGING_INFO || defined DWARF2_LINENO_DEBUGGING_INFO
 #define PREFERRED_DEBUGGING_TYPE DWARF2_DEBUG
 
 #elif defined VMS_DEBUGGING_INFO
@@ -1006,6 +1026,15 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #define MOVE_MAX_PIECES   MOVE_MAX
 #endif
 
+/* STORE_MAX_PIECES is the number of bytes at a time that we can
+   store efficiently.  Due to internal GCC limitations, this is
+   MOVE_MAX_PIECES limited by the number of bytes GCC can represent
+   for an immediate constant.  */
+
+#ifndef STORE_MAX_PIECES
+#define STORE_MAX_PIECES  MIN (MOVE_MAX_PIECES, 2 * sizeof (HOST_WIDE_INT))
+#endif
+
 #ifndef MAX_MOVE_MAX
 #define MAX_MOVE_MAX MOVE_MAX
 #endif
@@ -1079,6 +1108,10 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 
 #ifndef FRAME_GROWS_DOWNWARD
 #define FRAME_GROWS_DOWNWARD 0
+#endif
+
+#ifndef RETURN_ADDR_IN_PREVIOUS_FRAME
+#define RETURN_ADDR_IN_PREVIOUS_FRAME 0
 #endif
 
 /* On most machines, the CFA coincides with the first incoming parm.  */
@@ -1168,6 +1201,82 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #define DEFAULT_PCC_STRUCT_RETURN 1
 #endif
 
+#ifndef PCC_BITFIELD_TYPE_MATTERS
+#define PCC_BITFIELD_TYPE_MATTERS false
+#endif
+
+#ifndef INSN_SETS_ARE_DELAYED
+#define INSN_SETS_ARE_DELAYED(INSN) false
+#endif
+
+#ifndef INSN_REFERENCES_ARE_DELAYED
+#define INSN_REFERENCES_ARE_DELAYED(INSN) false
+#endif
+
+#ifndef NO_FUNCTION_CSE
+#define NO_FUNCTION_CSE false
+#endif
+
+#ifndef HARD_REGNO_RENAME_OK
+#define HARD_REGNO_RENAME_OK(FROM, TO) true
+#endif
+
+#ifndef EPILOGUE_USES
+#define EPILOGUE_USES(REG) false
+#endif
+
+#ifndef ARGS_GROW_DOWNWARD
+#define ARGS_GROW_DOWNWARD 0
+#endif
+
+#ifndef STACK_GROWS_DOWNWARD
+#define STACK_GROWS_DOWNWARD 0
+#endif
+
+#ifndef STACK_PUSH_CODE
+#if STACK_GROWS_DOWNWARD
+#define STACK_PUSH_CODE PRE_DEC
+#else
+#define STACK_PUSH_CODE PRE_INC
+#endif
+#endif
+
+/* Default value for flag_pie when flag_pie is initialized to -1:
+   --enable-default-pie: Default flag_pie to -fPIE.
+   --disable-default-pie: Default flag_pie to 0.
+ */
+#ifdef ENABLE_DEFAULT_PIE
+# ifndef DEFAULT_FLAG_PIE
+#  define DEFAULT_FLAG_PIE 2
+# endif
+#else
+# define DEFAULT_FLAG_PIE 0
+#endif
+
+#ifndef SWITCHABLE_TARGET
+#define SWITCHABLE_TARGET 0
+#endif
+
+/* If the target supports integers that are wider than two
+   HOST_WIDE_INTs on the host compiler, then the target should define
+   TARGET_SUPPORTS_WIDE_INT and make the appropriate fixups.
+   Otherwise the compiler really is not robust.  */
+#ifndef TARGET_SUPPORTS_WIDE_INT
+#define TARGET_SUPPORTS_WIDE_INT 0
+#endif
+
+#ifndef SHORT_IMMEDIATES_SIGN_EXTEND
+#define SHORT_IMMEDIATES_SIGN_EXTEND 0
+#endif
+
+#ifndef WORD_REGISTER_OPERATIONS
+#define WORD_REGISTER_OPERATIONS 0
+#endif
+
+#ifndef CONSTANT_ALIGNMENT
+#define CONSTANT_ALIGNMENT(EXP, ALIGN) ALIGN
+#endif
+
 #ifdef GCC_INSN_FLAGS_H
 /* Dependent default target macro definitions
 
@@ -1254,6 +1363,18 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #define STACK_SIZE_MODE word_mode
 #endif
 
+/* Default value for flag_stack_protect when flag_stack_protect is initialized to -1:
+   --enable-default-ssp: Default flag_stack_protect to -fstack-protector-strong.
+   --disable-default-ssp: Default flag_stack_protect to 0.
+ */
+#ifdef ENABLE_DEFAULT_SSP
+# ifndef DEFAULT_FLAG_SSP
+#  define DEFAULT_FLAG_SSP 3
+# endif
+#else
+# define DEFAULT_FLAG_SSP 0
+#endif
+
 /* Provide default values for the macros controlling stack checking.  */
 
 /* The default is neither full builtin stack checking...  */
@@ -1327,18 +1448,6 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
    pointer to a function.  */
 #ifndef TARGET_VTABLE_USES_DESCRIPTORS
 #define TARGET_VTABLE_USES_DESCRIPTORS 0
-#endif
-
-#ifndef SWITCHABLE_TARGET
-#define SWITCHABLE_TARGET 0
-#endif
-
-/* If the target supports integers that are wider than two
-   HOST_WIDE_INTs on the host compiler, then the target should define
-   TARGET_SUPPORTS_WIDE_INT and make the appropriate fixups.
-   Otherwise the compiler really is not robust.  */
-#ifndef TARGET_SUPPORTS_WIDE_INT
-#define TARGET_SUPPORTS_WIDE_INT 0
 #endif
 
 #endif /* GCC_INSN_FLAGS_H  */

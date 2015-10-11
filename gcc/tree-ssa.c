@@ -1,5 +1,5 @@
 /* Miscellaneous SSA utility functions.
-   Copyright (C) 2001-2014 Free Software Foundation, Inc.
+   Copyright (C) 2001-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,41 +20,29 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stor-layout.h"
 #include "flags.h"
 #include "tm_p.h"
 #include "target.h"
 #include "langhooks.h"
-#include "basic-block.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
 #include "gimple-pretty-print.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
 #include "gimple-fold.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimplify.h"
 #include "gimple-iterator.h"
 #include "gimple-walk.h"
-#include "gimple-ssa.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-ssa-loop-manip.h"
 #include "tree-into-ssa.h"
 #include "tree-ssa.h"
 #include "tree-inline.h"
-#include "hash-map.h"
 #include "tree-pass.h"
 #include "diagnostic-core.h"
 #include "cfgloop.h"
@@ -154,8 +142,8 @@ redirect_edge_var_map_destroy (void)
 edge
 ssa_redirect_edge (edge e, basic_block dest)
 {
-  gimple_stmt_iterator gsi;
-  gimple phi;
+  gphi_iterator gsi;
+  gphi *phi;
 
   redirect_edge_var_map_clear (e);
 
@@ -165,7 +153,7 @@ ssa_redirect_edge (edge e, basic_block dest)
       tree def;
       source_location locus ;
 
-      phi = gsi_stmt (gsi);
+      phi = gsi.phi ();
       def = gimple_phi_arg_def (phi, e->dest_idx);
       locus = gimple_phi_arg_location (phi, e->dest_idx);
 
@@ -187,10 +175,10 @@ ssa_redirect_edge (edge e, basic_block dest)
 void
 flush_pending_stmts (edge e)
 {
-  gimple phi;
+  gphi *phi;
   edge_var_map *vm;
   int i;
-  gimple_stmt_iterator gsi;
+  gphi_iterator gsi;
 
   vec<edge_var_map> *v = redirect_edge_var_map_vector (e);
   if (!v)
@@ -202,7 +190,7 @@ flush_pending_stmts (edge e)
     {
       tree def;
 
-      phi = gsi_stmt (gsi);
+      phi = gsi.phi ();
       def = redirect_edge_var_map_def (vm);
       add_phi_arg (phi, def, e, redirect_edge_var_map_location (vm));
     }
@@ -363,7 +351,7 @@ insert_debug_temp_for_var_def (gimple_stmt_iterator *gsi, tree var)
      we'll have to drop debug information.  */
   if (gimple_code (def_stmt) == GIMPLE_PHI)
     {
-      value = degenerate_phi_result (def_stmt);
+      value = degenerate_phi_result (as_a <gphi *> (def_stmt));
       if (value && walk_tree (&value, find_released_ssa_name, NULL, NULL))
 	value = NULL;
       /* error_mark_node is what fixup_noreturn_call changes PHI arguments
@@ -441,7 +429,7 @@ insert_debug_temp_for_var_def (gimple_stmt_iterator *gsi, tree var)
 	;
       else
 	{
-	  gimple def_temp;
+	  gdebug *def_temp;
 	  tree vexpr = make_node (DEBUG_EXPR_DECL);
 
 	  def_temp = gimple_build_debug_bind (vexpr,
@@ -835,7 +823,7 @@ verify_use (basic_block bb, basic_block def_bb, use_operand_p use_p,
       definition of SSA_NAME.  */
 
 static bool
-verify_phi_args (gimple phi, basic_block bb, basic_block *definition_block)
+verify_phi_args (gphi *phi, basic_block bb, basic_block *definition_block)
 {
   edge e;
   bool err = false;
@@ -966,9 +954,7 @@ verify_ssa (bool check_modified_stmt, bool check_ssa_operands)
   FOR_EACH_BB_FN (bb, cfun)
     {
       edge e;
-      gimple phi;
       edge_iterator ei;
-      gimple_stmt_iterator gsi;
 
       /* Make sure that all edges have a clear 'aux' field.  */
       FOR_EACH_EDGE (e, ei, bb->preds)
@@ -982,9 +968,9 @@ verify_ssa (bool check_modified_stmt, bool check_ssa_operands)
 	}
 
       /* Verify the arguments for every PHI node in the block.  */
-      for (gsi = gsi_start_phis (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+      for (gphi_iterator gsi = gsi_start_phis (bb); !gsi_end_p (gsi); gsi_next (&gsi))
 	{
-	  phi = gsi_stmt (gsi);
+	  gphi *phi = gsi.phi ();
 	  if (verify_phi_args (phi, bb, definition_block))
 	    goto err;
 
@@ -993,7 +979,8 @@ verify_ssa (bool check_modified_stmt, bool check_ssa_operands)
 	}
 
       /* Now verify all the uses and vuses in every statement of the block.  */
-      for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+      for (gimple_stmt_iterator gsi = gsi_start_bb (bb); !gsi_end_p (gsi);
+	   gsi_next (&gsi))
 	{
 	  gimple stmt = gsi_stmt (gsi);
 	  use_operand_p use_p;
@@ -1185,10 +1172,11 @@ tree_ssa_strip_useless_type_conversions (tree exp)
 }
 
 
-/* Return true if T, an SSA_NAME, has an undefined value.  */
+/* Return true if T, an SSA_NAME, has an undefined value.  PARTIAL is what
+   should be returned if the value is only partially undefined.  */
 
 bool
-ssa_undefined_value_p (tree t)
+ssa_undefined_value_p (tree t, bool partial)
 {
   gimple def_stmt;
   tree var = SSA_NAME_VAR (t);
@@ -1212,7 +1200,7 @@ ssa_undefined_value_p (tree t)
     return true;
 
   /* Check if the complex was not only partially defined.  */
-  if (is_gimple_assign (def_stmt)
+  if (partial && is_gimple_assign (def_stmt)
       && gimple_assign_rhs_code (def_stmt) == COMPLEX_EXPR)
     {
       tree rhs1, rhs2;
@@ -1327,6 +1315,13 @@ non_rewritable_lvalue_p (tree lhs)
   if (DECL_P (lhs))
     return false;
 
+  /* We can re-write REALPART_EXPR and IMAGPART_EXPR sets in
+     a reasonably efficient manner... */
+  if ((TREE_CODE (lhs) == REALPART_EXPR
+       || TREE_CODE (lhs) == IMAGPART_EXPR)
+      && DECL_P (TREE_OPERAND (lhs, 0)))
+    return false;
+
   /* A decl that is wrapped inside a MEM-REF that covers
      it full is also rewritable.
      ???  The following could be relaxed allowing component
@@ -1402,7 +1397,6 @@ maybe_optimize_var (tree var, bitmap addresses_taken, bitmap not_reg_needs,
 void
 execute_update_addresses_taken (void)
 {
-  gimple_stmt_iterator gsi;
   basic_block bb;
   bitmap addresses_taken = BITMAP_ALLOC (NULL);
   bitmap not_reg_needs = BITMAP_ALLOC (NULL);
@@ -1416,7 +1410,8 @@ execute_update_addresses_taken (void)
      the function body.  */
   FOR_EACH_BB_FN (bb, cfun)
     {
-      for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+      for (gimple_stmt_iterator gsi = gsi_start_bb (bb); !gsi_end_p (gsi);
+	   gsi_next (&gsi))
 	{
 	  gimple stmt = gsi_stmt (gsi);
 	  enum gimple_code code = gimple_code (stmt);
@@ -1459,9 +1454,10 @@ execute_update_addresses_taken (void)
 
 	  else if (code == GIMPLE_ASM)
 	    {
-	      for (i = 0; i < gimple_asm_noutputs (stmt); ++i)
+	      gasm *asm_stmt = as_a <gasm *> (stmt);
+	      for (i = 0; i < gimple_asm_noutputs (asm_stmt); ++i)
 		{
-		  tree link = gimple_asm_output_op (stmt, i);
+		  tree link = gimple_asm_output_op (asm_stmt, i);
 		  tree lhs = TREE_VALUE (link);
 		  if (TREE_CODE (lhs) != SSA_NAME)
 		    {
@@ -1476,19 +1472,20 @@ execute_update_addresses_taken (void)
 			bitmap_set_bit (not_reg_needs, DECL_UID (decl));
 		    }
 		}
-	      for (i = 0; i < gimple_asm_ninputs (stmt); ++i)
+	      for (i = 0; i < gimple_asm_ninputs (asm_stmt); ++i)
 		{
-		  tree link = gimple_asm_input_op (stmt, i);
+		  tree link = gimple_asm_input_op (asm_stmt, i);
 		  if ((decl = non_rewritable_mem_ref_base (TREE_VALUE (link))))
 		    bitmap_set_bit (not_reg_needs, DECL_UID (decl));
 		}
 	    }
 	}
 
-      for (gsi = gsi_start_phis (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+      for (gphi_iterator gsi = gsi_start_phis (bb); !gsi_end_p (gsi);
+	   gsi_next (&gsi))
 	{
 	  size_t i;
-	  gimple phi = gsi_stmt (gsi);
+	  gphi *phi = gsi.phi ();
 
 	  for (i = 0; i < gimple_phi_num_args (phi); i++)
 	    {
@@ -1517,7 +1514,7 @@ execute_update_addresses_taken (void)
   if (!bitmap_empty_p (suitable_for_renaming))
     {
       FOR_EACH_BB_FN (bb, cfun)
-	for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi);)
+	for (gimple_stmt_iterator gsi = gsi_start_bb (bb); !gsi_end_p (gsi);)
 	  {
 	    gimple stmt = gsi_stmt (gsi);
 
@@ -1528,6 +1525,37 @@ execute_update_addresses_taken (void)
 		tree lhs = gimple_assign_lhs (stmt);
 		tree rhs, *rhsp = gimple_assign_rhs1_ptr (stmt);
 		tree sym;
+
+		/* Rewrite LHS IMAG/REALPART_EXPR similar to
+		   gimplify_modify_expr_complex_part.  */
+		if ((TREE_CODE (lhs) == IMAGPART_EXPR
+		     || TREE_CODE (lhs) == REALPART_EXPR)
+		    && DECL_P (TREE_OPERAND (lhs, 0))
+		    && bitmap_bit_p (suitable_for_renaming,
+				     DECL_UID (TREE_OPERAND (lhs, 0))))
+		  {
+		    tree other = make_ssa_name (TREE_TYPE (lhs));
+		    tree lrhs = build1 (TREE_CODE (lhs) == IMAGPART_EXPR
+					? REALPART_EXPR : IMAGPART_EXPR,
+					TREE_TYPE (other),
+					TREE_OPERAND (lhs, 0));
+		    gimple load = gimple_build_assign (other, lrhs);
+		    location_t loc = gimple_location (stmt);
+		    gimple_set_location (load, loc);
+		    gimple_set_vuse (load, gimple_vuse (stmt));
+		    gsi_insert_before (&gsi, load, GSI_SAME_STMT);
+		    gimple_assign_set_lhs (stmt, TREE_OPERAND (lhs, 0));
+		    gimple_assign_set_rhs_with_ops
+		      (&gsi, COMPLEX_EXPR,
+		       TREE_CODE (lhs) == IMAGPART_EXPR
+		       ? other : gimple_assign_rhs1 (stmt),
+		       TREE_CODE (lhs) == IMAGPART_EXPR
+		       ? gimple_assign_rhs1 (stmt) : other, NULL_TREE);
+		    stmt = gsi_stmt (gsi);
+		    unlink_stmt_vdef (stmt);
+		    update_stmt (stmt);
+		    continue;
+		  }
 
 		/* We shouldn't have any fancy wrapping of
 		   component-refs on the LHS, but look through
@@ -1558,18 +1586,6 @@ execute_update_addresses_taken (void)
 		if (gimple_assign_lhs (stmt) != lhs)
 		  gimple_assign_set_lhs (stmt, lhs);
 
-		/* For var ={v} {CLOBBER}; where var lost
-		   TREE_ADDRESSABLE just remove the stmt.  */
-		if (DECL_P (lhs)
-		    && TREE_CLOBBER_P (rhs)
-		    && bitmap_bit_p (suitable_for_renaming, DECL_UID (lhs)))
-		  {
-		    unlink_stmt_vdef (stmt);
-      		    gsi_remove (&gsi, true);
-		    release_defs (stmt);
-		    continue;
-		  }
-
 		if (gimple_assign_rhs1 (stmt) != rhs)
 		  {
 		    gimple_stmt_iterator gsi = gsi_for_stmt (stmt);
@@ -1589,16 +1605,17 @@ execute_update_addresses_taken (void)
 
 	    else if (gimple_code (stmt) == GIMPLE_ASM)
 	      {
+		gasm *asm_stmt = as_a <gasm *> (stmt);
 		unsigned i;
-		for (i = 0; i < gimple_asm_noutputs (stmt); ++i)
+		for (i = 0; i < gimple_asm_noutputs (asm_stmt); ++i)
 		  {
-		    tree link = gimple_asm_output_op (stmt, i);
+		    tree link = gimple_asm_output_op (asm_stmt, i);
 		    maybe_rewrite_mem_ref_base (&TREE_VALUE (link),
 						suitable_for_renaming);
 		  }
-		for (i = 0; i < gimple_asm_ninputs (stmt); ++i)
+		for (i = 0; i < gimple_asm_ninputs (asm_stmt); ++i)
 		  {
-		    tree link = gimple_asm_input_op (stmt, i);
+		    tree link = gimple_asm_input_op (asm_stmt, i);
 		    maybe_rewrite_mem_ref_base (&TREE_VALUE (link),
 						suitable_for_renaming);
 		  }

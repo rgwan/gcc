@@ -1,5 +1,5 @@
 /* Routines for performing Temporary Expression Replacement (TER) in SSA trees.
-   Copyright (C) 2003-2014 Free Software Foundation, Inc.
+   Copyright (C) 2003-2015 Free Software Foundation, Inc.
    Contributed by Andrew MacLeod  <amacleod@redhat.com>
 
 This file is part of GCC.
@@ -22,22 +22,16 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
 #include "tree.h"
-#include "gimple-pretty-print.h"
-#include "bitmap.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
 #include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
+#include "gimple-pretty-print.h"
+#include "internal-fn.h"
 #include "gimple-iterator.h"
-#include "gimple-ssa.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "dumpfile.h"
 #include "tree-ssa-live.h"
 #include "tree-ssa-ter.h"
@@ -131,7 +125,7 @@ along with GCC; see the file COPYING3.  If not see
    information, but the info in one is not easy to obtain from the other.
 
    KILL_LIST is yet another bitmap array, this time it is indexed by partition
-   number, and represents a list of active expressions which will will no
+   number, and represents a list of active expressions which will no
    longer be valid if a definition into this partition takes place.
 
    PARTITION_IN_USE is simply a bitmap which is used to track which partitions
@@ -428,8 +422,8 @@ ter_is_replaceable_p (gimple stmt)
       block1 = LOCATION_BLOCK (locus1);
       locus1 = LOCATION_LOCUS (locus1);
 
-      if (gimple_code (use_stmt) == GIMPLE_PHI)
-	locus2 = gimple_phi_arg_location (use_stmt, 
+      if (gphi *phi = dyn_cast <gphi *> (use_stmt))
+	locus2 = gimple_phi_arg_location (phi,
 					  PHI_ARG_INDEX_FROM_USE (use_p));
       else
 	locus2 = gimple_location (use_stmt);

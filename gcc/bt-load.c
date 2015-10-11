@@ -1,6 +1,6 @@
 
 /* Perform branch target register load optimizations.
-   Copyright (C) 2001-2014 Free Software Foundation, Inc.
+   Copyright (C) 2001-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,29 +21,35 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "tree.h"
 #include "rtl.h"
-#include "hard-reg-set.h"
+#include "df.h"
 #include "regs.h"
-#include "fibheap.h"
 #include "target.h"
-#include "expr.h"
 #include "flags.h"
+#include "alias.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
+#include "expr.h"
 #include "insn-attr.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
 #include "except.h"
 #include "tm_p.h"
 #include "diagnostic-core.h"
 #include "tree-pass.h"
 #include "recog.h"
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "cfgcleanup.h"
 #include "cfgloop.h"
 #include "rtl-iter.h"
+#include "fibonacci_heap.h"
 
 /* Target register optimizations - these are performed after reload.  */
 
@@ -115,23 +121,26 @@ typedef struct btr_def_s
   bitmap live_range;
 } *btr_def;
 
+typedef fibonacci_heap <long, btr_def_s> btr_heap_t;
+typedef fibonacci_node <long, btr_def_s> btr_heap_node_t;
+
 static int issue_rate;
 
 static int basic_block_freq (const_basic_block);
 static int insn_sets_btr_p (const rtx_insn *, int, int *);
 static void find_btr_def_group (btr_def_group *, btr_def);
-static btr_def add_btr_def (fibheap_t, basic_block, int, rtx_insn *,
+static btr_def add_btr_def (btr_heap_t *, basic_block, int, rtx_insn *,
 			    unsigned int, int, btr_def_group *);
 static btr_user new_btr_user (basic_block, int, rtx_insn *);
 static void dump_hard_reg_set (HARD_REG_SET);
 static void dump_btrs_live (int);
 static void note_other_use_this_block (unsigned int, btr_user);
-static void compute_defs_uses_and_gen (fibheap_t, btr_def *,btr_user *,
+static void compute_defs_uses_and_gen (btr_heap_t *, btr_def *,btr_user *,
 				       sbitmap *, sbitmap *, HARD_REG_SET *);
 static void compute_kill (sbitmap *, sbitmap *, HARD_REG_SET *);
 static void compute_out (sbitmap *bb_out, sbitmap *, sbitmap *, int);
 static void link_btr_uses (btr_def *, btr_user *, sbitmap *, sbitmap *, int);
-static void build_btr_def_use_webs (fibheap_t);
+static void build_btr_def_use_webs (btr_heap_t *);
 static int block_at_edge_of_live_range_p (int, btr_def);
 static void clear_btr_from_live_range (btr_def def);
 static void add_btr_to_live_range (btr_def, int);
@@ -283,7 +292,7 @@ find_btr_def_group (btr_def_group *all_btr_def_groups, btr_def def)
    block BB, instruction INSN, and insert it into ALL_BTR_DEFS.  Return
    the new definition.  */
 static btr_def
-add_btr_def (fibheap_t all_btr_defs, basic_block bb, int insn_luid,
+add_btr_def (btr_heap_t *all_btr_defs, basic_block bb, int insn_luid,
 	     rtx_insn *insn,
 	     unsigned int dest_reg, int other_btr_uses_before_def,
 	     btr_def_group *all_btr_def_groups)
@@ -303,7 +312,7 @@ add_btr_def (fibheap_t all_btr_defs, basic_block bb, int insn_luid,
   this_def->live_range = NULL;
   find_btr_def_group (all_btr_def_groups, this_def);
 
-  fibheap_insert (all_btr_defs, -this_def->cost, this_def);
+  all_btr_defs->insert (-this_def->cost, this_def);
 
   if (dump_file)
     fprintf (dump_file,
@@ -395,13 +404,13 @@ note_other_use_this_block (unsigned int regno, btr_user users_this_bb)
       user->other_use_this_block = 1;
 }
 
-typedef struct {
+struct defs_uses_info {
   btr_user users_this_bb;
   HARD_REG_SET btrs_written_in_block;
   HARD_REG_SET btrs_live_in_block;
   sbitmap bb_gen;
   sbitmap *btr_defset;
-} defs_uses_info;
+};
 
 /* Called via note_stores or directly to register stores into /
    clobbers of a branch target register DEST that are not recognized as
@@ -416,7 +425,7 @@ note_btr_set (rtx dest, const_rtx set ATTRIBUTE_UNUSED, void *data)
   if (!REG_P (dest))
     return;
   regno = REGNO (dest);
-  end_regno = END_HARD_REGNO (dest);
+  end_regno = END_REGNO (dest);
   for (; regno < end_regno; regno++)
     if (TEST_HARD_REG_BIT (all_btrs, regno))
       {
@@ -429,7 +438,7 @@ note_btr_set (rtx dest, const_rtx set ATTRIBUTE_UNUSED, void *data)
 }
 
 static void
-compute_defs_uses_and_gen (fibheap_t all_btr_defs, btr_def *def_array,
+compute_defs_uses_and_gen (btr_heap_t *all_btr_defs, btr_def *def_array,
 			   btr_user *use_array, sbitmap *btr_defset,
 			   sbitmap *bb_gen, HARD_REG_SET *btrs_written)
 {
@@ -523,8 +532,7 @@ compute_defs_uses_and_gen (fibheap_t all_btr_defs, btr_def *def_array,
 			  int reg;
 			  for (reg = first_btr; reg <= last_btr; reg++)
 			    if (TEST_HARD_REG_BIT (all_btrs, reg)
-				&& refers_to_regno_p (reg, reg + 1, user->insn,
-						      NULL))
+				&& refers_to_regno_p (reg, user->insn))
 			      {
 				note_other_use_this_block (reg,
 							   info.users_this_bb);
@@ -587,7 +595,7 @@ compute_defs_uses_and_gen (fibheap_t all_btr_defs, btr_def *def_array,
 	  int regno;
 
 	  for (regno = first_btr; regno <= last_btr; regno++)
-	    if (refers_to_regno_p (regno, regno+1, insn, NULL))
+	    if (refers_to_regno_p (regno, insn))
 	      SET_HARD_REG_BIT (btrs_live_at_end[i], regno);
 	}
 
@@ -700,8 +708,7 @@ link_btr_uses (btr_def *def_array, btr_user *use_array, sbitmap *bb_out,
 		      bitmap_clear (reaching_defs_of_reg);
 		      for (reg = first_btr; reg <= last_btr; reg++)
 			if (TEST_HARD_REG_BIT (all_btrs, reg)
-			    && refers_to_regno_p (reg, reg + 1, user->insn,
-						  NULL))
+			    && refers_to_regno_p (reg, user->insn))
 			  bitmap_or_and (reaching_defs_of_reg,
 			    reaching_defs_of_reg,
 			    reaching_defs,
@@ -760,7 +767,7 @@ link_btr_uses (btr_def *def_array, btr_user *use_array, sbitmap *bb_out,
 }
 
 static void
-build_btr_def_use_webs (fibheap_t all_btr_defs)
+build_btr_def_use_webs (btr_heap_t *all_btr_defs)
 {
   const int max_uid = get_max_uid ();
   btr_def  *def_array   = XCNEWVEC (btr_def, max_uid);
@@ -1146,7 +1153,7 @@ move_btr_def (basic_block new_def_bb, int btr, btr_def def, bitmap live_range,
   rtx src;
   rtx btr_rtx;
   rtx_insn *new_insn;
-  enum machine_mode btr_mode;
+  machine_mode btr_mode;
   btr_user user;
   rtx set;
 
@@ -1187,7 +1194,7 @@ move_btr_def (basic_block new_def_bb, int btr, btr_def def, bitmap live_range,
   btr_mode = GET_MODE (SET_DEST (set));
   btr_rtx = gen_rtx_REG (btr_mode, btr);
 
-  new_insn = as_a <rtx_insn *> (gen_move_insn (btr_rtx, src));
+  new_insn = gen_move_insn (btr_rtx, src);
 
   /* Insert target register initialization at head of basic block.  */
   def->insn = emit_insn_after (new_insn, insp);
@@ -1386,7 +1393,7 @@ migrate_btr_def (btr_def def, int min_cost)
 static void
 migrate_btr_defs (enum reg_class btr_class, int allow_callee_save)
 {
-  fibheap_t all_btr_defs = fibheap_new ();
+  btr_heap_t all_btr_defs (LONG_MIN);
   int reg;
 
   gcc_obstack_init (&migrate_btrl_obstack);
@@ -1420,15 +1427,15 @@ migrate_btr_defs (enum reg_class btr_class, int allow_callee_save)
   btrs_live = XCNEWVEC (HARD_REG_SET, last_basic_block_for_fn (cfun));
   btrs_live_at_end = XCNEWVEC (HARD_REG_SET, last_basic_block_for_fn (cfun));
 
-  build_btr_def_use_webs (all_btr_defs);
+  build_btr_def_use_webs (&all_btr_defs);
 
-  while (!fibheap_empty (all_btr_defs))
+  while (!all_btr_defs.empty ())
     {
-      btr_def def = (btr_def) fibheap_extract_min (all_btr_defs);
-      int min_cost = -fibheap_min_key (all_btr_defs);
+      int min_cost = -all_btr_defs.min_key ();
+      btr_def def = all_btr_defs.extract_min ();
       if (migrate_btr_def (def, min_cost))
 	{
-	  fibheap_insert (all_btr_defs, -def->cost, (void *) def);
+	  all_btr_defs.insert (-def->cost, def);
 	  if (dump_file)
 	    {
 	      fprintf (dump_file,
@@ -1443,7 +1450,6 @@ migrate_btr_defs (enum reg_class btr_class, int allow_callee_save)
   free (btrs_live);
   free (btrs_live_at_end);
   obstack_free (&migrate_btrl_obstack, NULL);
-  fibheap_delete (all_btr_defs);
 }
 
 static void

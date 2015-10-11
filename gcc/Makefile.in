@@ -1,7 +1,7 @@
 # Makefile for GNU Compiler Collection
 # Run 'configure' to generate Makefile from Makefile.in
 
-# Copyright (C) 1987-2014 Free Software Foundation, Inc.
+# Copyright (C) 1987-2015 Free Software Foundation, Inc.
 
 #This file is part of GCC.
 
@@ -59,6 +59,11 @@ host=@host@
 target=@target@
 target_noncanonical:=@target_noncanonical@
 
+# Normally identical to target_noncanonical, except for compilers built
+# as accelerator targets.
+real_target_noncanonical:=@real_target_noncanonical@
+accel_dir_suffix = @accel_dir_suffix@
+
 # Sed command to transform gcc to installed name.
 program_transform_name := @program_transform_name@
 
@@ -73,6 +78,9 @@ gcc_docdir = @srcdir@/doc
 # Directory where sources are, absolute.
 abs_srcdir = @abs_srcdir@
 abs_docdir = @abs_srcdir@/doc
+
+# Directory where sources are, relative to here.
+top_srcdir = @top_srcdir@
 
 # Top build directory for this package, relative to here.
 top_builddir = .
@@ -172,6 +180,8 @@ NOCOMMON_FLAG = @nocommon_flag@
 
 NOEXCEPTION_FLAGS = @noexception_flags@
 
+ALIASING_FLAGS = @aliasing_flags@
+
 # This is set by --disable-maintainer-mode (default) to "#"
 # FIXME: 'MAINT' will always be set to an empty string, no matter if
 # --disable-maintainer-mode is used or not.  This is because the
@@ -204,8 +214,9 @@ gengtype-lex.o-warn = -Wno-error
 libgcov-util.o-warn = -Wno-error
 libgcov-driver-tool.o-warn = -Wno-error
 libgcov-merge-tool.o-warn = -Wno-error
-gimple-match.o-warn = -Wno-unused-variable -Wno-unused-parameter
-generic-match.o-warn = -Wno-unused-variable -Wno-unused-parameter
+gimple-match.o-warn = -Wno-unused
+generic-match.o-warn = -Wno-unused
+dfp.o-warn = -Wno-strict-aliasing
 
 # All warnings have to be shut off in stage1 if the compiler used then
 # isn't gcc; configure determines that.  WARN_CFLAGS will be either
@@ -246,6 +257,12 @@ else
 LINKER = $(CC)
 LINKER_FLAGS = $(CFLAGS)
 endif
+
+# We don't want to compile the compilers with -fPIE, it make PCH fail.
+COMPILER += @NO_PIE_CFLAGS@
+
+# Link with -no-pie since we compile the compiler with -fno-PIE.
+LINKER += @NO_PIE_FLAG@
 
 # Like LINKER, but use a mutex for serializing front end links.
 ifeq (@DO_LINK_MUTEX@,true)
@@ -316,6 +333,11 @@ write_entries_to_file = $(shell rm -f $(2) || :) $(shell touch $(2)) \
 			  $(shell expr $(range) + $(write_entries_to_file_split) - 1), $(1))" \
 	     | tr ' ' '\012' >> $(2)))
 
+# The jit documentation looks better if built with sphinx, but can be
+# built with texinfo if sphinx is not available.
+# configure sets "doc_build_sys" to "sphinx" or "texinfo" accordingly
+doc_build_sys=@doc_build_sys@
+
 # --------
 # UNSORTED
 # --------
@@ -344,10 +366,6 @@ GMPINC = @GMPINC@
 ISLLIBS = @ISLLIBS@
 ISLINC = @ISLINC@
 
-# How to find CLOOG
-CLOOGLIBS = @CLOOGLIBS@
-CLOOGINC = @CLOOGINC@
-
 # Set to 'yes' if the LTO front end is enabled.
 enable_lto = @enable_lto@
 
@@ -361,6 +379,8 @@ PLUGINLIBS = @pluginlibs@
 enable_plugin = @enable_plugin@
 
 enable_host_shared = @enable_host_shared@
+
+enable_as_accelerator = @enable_as_accelerator@
 
 CPPLIB = ../libcpp/libcpp.a
 CPPINC = -I$(srcdir)/../libcpp/include
@@ -519,10 +539,6 @@ xm_include_list=@xm_include_list@
 xm_defines=@xm_defines@
 lang_checks=
 lang_checks_parallelized=
-# Upper limit to which it is useful to parallelize this lang target.
-# It doesn't make sense to try e.g. 128 goals for small testsuites
-# like objc or go.
-check_gcc_parallelize=10000
 lang_opt_files=@lang_opt_files@ $(srcdir)/c-family/c.opt $(srcdir)/common.opt
 lang_specs_files=@lang_specs_files@
 lang_tree_files=@lang_tree_files@
@@ -573,9 +589,9 @@ libexecdir = @libexecdir@
 # --------
 
 # Directory in which the compiler finds libraries etc.
-libsubdir = $(libdir)/gcc/$(target_noncanonical)/$(version)
+libsubdir = $(libdir)/gcc/$(real_target_noncanonical)/$(version)$(accel_dir_suffix)
 # Directory in which the compiler finds executables
-libexecsubdir = $(libexecdir)/gcc/$(target_noncanonical)/$(version)
+libexecsubdir = $(libexecdir)/gcc/$(real_target_noncanonical)/$(version)$(accel_dir_suffix)
 # Directory in which all plugin resources are installed
 plugin_resourcesdir = $(libsubdir)/plugin
  # Directory in which plugin headers are installed
@@ -583,7 +599,11 @@ plugin_includedir = $(plugin_resourcesdir)/include
 # Directory in which plugin specific executables are installed
 plugin_bindir = $(libexecsubdir)/plugin
 # Used to produce a relative $(gcc_tooldir) in gcc.o
+ifeq ($(enable_as_accelerator),yes)
+unlibsubdir = ../../../../..
+else
 unlibsubdir = ../../..
+endif
 # $(prefix), expressed as a path relative to $(libsubdir).
 #
 # An explanation of the sed strings:
@@ -737,6 +757,8 @@ CC_FOR_BUILD = @CC_FOR_BUILD@
 CXX_FOR_BUILD = @CXX_FOR_BUILD@
 BUILD_CFLAGS= @BUILD_CFLAGS@ -DGENERATOR_FILE
 BUILD_CXXFLAGS = @BUILD_CXXFLAGS@ -DGENERATOR_FILE
+BUILD_CFLAGS += @NO_PIE_CFLAGS@
+BUILD_CXXFLAGS += @NO_PIE_CFLAGS@
 
 # Native compiler that we use.  This may be C++ some day.
 COMPILER_FOR_BUILD = $(CXX_FOR_BUILD)
@@ -748,6 +770,7 @@ BUILD_LINKERFLAGS = $(BUILD_CXXFLAGS)
 
 # Native linker and preprocessor flags.  For x-fragment overrides.
 BUILD_LDFLAGS=@BUILD_LDFLAGS@
+BUILD_LDFLAGS += @NO_PIE_FLAG@
 BUILD_CPPFLAGS= -I. -I$(@D) -I$(srcdir) -I$(srcdir)/$(@D) \
 		-I$(srcdir)/../include @INCINTL@ $(CPPINC) $(CPPFLAGS)
 
@@ -816,14 +839,20 @@ endif
 
 version     := $(BASEVER_c)
 
+PATCHLEVEL_c := \
+  $(shell echo $(BASEVER_c) | sed -e 's/^[0-9]*\.[0-9]*\.\([0-9]*\)$$/\1/')
+
+
 # For use in version.c - double quoted strings, with appropriate
 # surrounding punctuation and spaces, and with the datestamp and
 # development phase collapsed to the empty string in release mode
-# (i.e. if DEVPHASE_c is empty).  The space immediately after the
-# comma in the $(if ...) constructs is significant - do not remove it.
+# (i.e. if DEVPHASE_c is empty and PATCHLEVEL_c is 0).  The space
+# immediately after the comma in the $(if ...) constructs is
+# significant - do not remove it.
 BASEVER_s   := "\"$(BASEVER_c)\""
 DEVPHASE_s  := "\"$(if $(DEVPHASE_c), ($(DEVPHASE_c)))\""
-DATESTAMP_s := "\"$(if $(DEVPHASE_c), $(DATESTAMP_c))\""
+DATESTAMP_s := \
+  "\"$(if $(DEVPHASE_c)$(filter-out 0,$(PATCHLEVEL_c)), $(DATESTAMP_c))\""
 PKGVERSION_s:= "\"@PKGVERSION@\""
 BUGURL_s    := "\"@REPORT_BUGS_TO@\""
 
@@ -831,7 +860,8 @@ PKGVERSION  := @PKGVERSION@
 BUGURL_TEXI := @REPORT_BUGS_TEXI@
 
 ifdef REVISION_c
-REVISION_s  := "\"$(if $(DEVPHASE_c), $(REVISION_c))\""
+REVISION_s  := \
+  "\"$(if $(DEVPHASE_c)$(filter-out 0,$(PATCHLEVEL_c)), $(REVISION_c))\""
 else
 REVISION_s  := "\"\""
 endif
@@ -841,7 +871,7 @@ DUMPFILE_H = $(srcdir)/../libcpp/include/line-map.h dumpfile.h
 VEC_H = vec.h statistics.h $(GGC_H)
 HASH_TABLE_H = $(HASHTAB_H) hash-table.h
 EXCEPT_H = except.h $(HASHTAB_H)
-TARGET_DEF = target.def target-hooks-macros.h
+TARGET_DEF = target.def target-hooks-macros.h target-insns.def
 C_TARGET_DEF = c-family/c-target.def target-hooks-macros.h
 COMMON_TARGET_DEF = common/common-target.def target-hooks-macros.h
 TARGET_H = $(TM_H) target.h $(TARGET_DEF) insn-modes.h insn-codes.h
@@ -958,7 +988,8 @@ ALL_CFLAGS = $(T_CFLAGS) $(CFLAGS-$@) \
 
 # The C++ version.
 ALL_CXXFLAGS = $(T_CFLAGS) $(CFLAGS-$@) $(CXXFLAGS) $(INTERNAL_CFLAGS) \
-  $(COVERAGE_FLAGS) $(NOEXCEPTION_FLAGS) $(WARN_CXXFLAGS) @DEFS@
+  $(COVERAGE_FLAGS) $(ALIASING_FLAGS) $(NOEXCEPTION_FLAGS) \
+  $(WARN_CXXFLAGS) @DEFS@
 
 # Likewise.  Put INCLUDES at the beginning: this way, if some autoconf macro
 # puts -I options in CPPFLAGS, our include files in the srcdir will always
@@ -994,7 +1025,7 @@ BUILD_LIBDEPS= $(BUILD_LIBIBERTY)
 # and the system's installed libraries.
 LIBS = @LIBS@ libcommon.a $(CPPLIB) $(LIBINTL) $(LIBICONV) $(LIBBACKTRACE) \
 	$(LIBIBERTY) $(LIBDECNUMBER) $(HOST_LIBS)
-BACKENDLIBS = $(CLOOGLIBS) $(ISLLIBS) $(GMPLIBS) $(PLUGINLIBS) $(HOST_LIBS) \
+BACKENDLIBS = $(ISLLIBS) $(GMPLIBS) $(PLUGINLIBS) $(HOST_LIBS) \
 	$(ZLIB)
 # Any system libraries needed just for GNAT.
 SYSLIBS = @GNAT_LIBEXC@
@@ -1012,7 +1043,7 @@ BUILD_LIBS = $(BUILD_LIBIBERTY)
 
 BUILD_RTL = build/rtl.o build/read-rtl.o build/ggc-none.o \
 	    build/vec.o build/min-insn-modes.o build/gensupport.o \
-	    build/print-rtl.o
+	    build/print-rtl.o build/hash-table.o
 BUILD_MD = build/read-md.o
 BUILD_ERRORS = build/errors.o
 
@@ -1026,7 +1057,7 @@ BUILD_ERRORS = build/errors.o
 INCLUDES = -I. -I$(@D) -I$(srcdir) -I$(srcdir)/$(@D) \
 	   -I$(srcdir)/../include @INCINTL@ \
 	   $(CPPINC) $(GMPINC) $(DECNUMINC) $(BACKTRACEINC) \
-	   $(CLOOGINC) $(ISLINC)
+	   $(ISLINC)
 
 COMPILE.base = $(COMPILER) -c $(ALL_COMPILERFLAGS) $(ALL_CPPFLAGS) -o $@
 ifeq ($(CXXDEPMODE),depmode=gcc3)
@@ -1120,24 +1151,26 @@ CXX_TARGET_OBJS=@cxx_target_objs@
 FORTRAN_TARGET_OBJS=@fortran_target_objs@
 
 # Object files for gcc many-languages driver.
-GCC_OBJS = gcc.o ggc-none.o
+GCC_OBJS = gcc.o gcc-main.o ggc-none.o
 
 c-family-warn = $(STRICT_WARN)
 
 # Language-specific object files shared by all C-family front ends.
 C_COMMON_OBJS = c-family/c-common.o c-family/c-cppbuiltin.o c-family/c-dump.o \
-  c-family/c-format.o c-family/c-gimplify.o c-family/c-lex.o \
-  c-family/c-omp.o c-family/c-opts.o c-family/c-pch.o \
+  c-family/c-format.o c-family/c-gimplify.o c-family/c-indentation.o \
+  c-family/c-lex.o c-family/c-omp.o c-family/c-opts.o c-family/c-pch.o \
   c-family/c-ppoutput.o c-family/c-pragma.o c-family/c-pretty-print.o \
   c-family/c-semantics.o c-family/c-ada-spec.o \
   c-family/c-cilkplus.o \
   c-family/array-notation-common.o c-family/cilk.o c-family/c-ubsan.o
 
 # Language-independent object files.
-# We put the insn-*.o files first so that a parallel make will build
-# them sooner, because they are large and otherwise tend to be the
-# last objects to finish building.
+# We put the *-match.o and insn-*.o files first so that a parallel make
+# will build them sooner, because they are large and otherwise tend to be
+# the last objects to finish building.
 OBJS = \
+	gimple-match.o \
+	generic-match.o \
 	insn-attrtab.o \
 	insn-automata.o \
 	insn-dfatab.o \
@@ -1162,6 +1195,7 @@ OBJS = \
 	builtins.o \
 	caller-save.o \
 	calls.o \
+	ccmp.o \
 	cfg.o \
 	cfganal.o \
 	cfgbuild.o \
@@ -1222,15 +1256,15 @@ OBJS = \
 	function.o \
 	fwprop.o \
 	gcse.o \
+	gcse-common.o \
 	ggc-common.o \
 	gimple.o \
 	gimple-builder.o \
 	gimple-expr.o \
 	gimple-iterator.o \
 	gimple-fold.o \
+	gimple-laddress.o \
 	gimple-low.o \
-	gimple-match.o \
-	generic-match.o \
 	gimple-pretty-print.o \
 	gimple-ssa-isolate-paths.o \
 	gimple-ssa-strength-reduction.o \
@@ -1244,7 +1278,6 @@ OBJS = \
 	graphds.o \
 	graphite.o \
 	graphite-blocking.o \
-	graphite-clast-to-gimple.o \
 	graphite-isl-ast-to-gimple.o \
 	graphite-dependences.o \
 	graphite-interchange.o \
@@ -1262,6 +1295,7 @@ OBJS = \
 	incpath.o \
 	init-regs.o \
 	internal-fn.o \
+	ipa-chkp.o \
 	ipa-cp.o \
 	ipa-devirt.o \
 	ipa-polymorphic-call.o \
@@ -1303,6 +1337,7 @@ OBJS = \
 	lra-constraints.o \
 	lra-eliminations.o \
 	lra-lives.o \
+	lra-remat.o \
 	lra-spills.o \
 	lto-cgraph.o \
 	lto-streamer.o \
@@ -1315,7 +1350,6 @@ OBJS = \
 	mcf.o \
 	mode-switching.o \
 	modulo-sched.o \
-	omega.o \
 	omp-low.o \
 	optabs.o \
 	options-save.o \
@@ -1340,6 +1374,7 @@ OBJS = \
 	reload1.o \
 	reorg.o \
 	resource.o \
+	rtl-chkp.o \
 	rtl-error.o \
 	rtl.o \
 	rtlhash.o \
@@ -1376,6 +1411,7 @@ OBJS = \
 	asan.o \
 	tsan.o \
 	ubsan.o \
+	sanopt.o \
 	tree-call-cdce.o \
 	tree-cfg.o \
 	tree-cfgcleanup.o \
@@ -1398,6 +1434,8 @@ OBJS = \
 	tree-outof-ssa.o \
 	tree-parloops.o \
 	tree-phinodes.o \
+	tree-chkp.o \
+	tree-chkp-opt.o \
 	tree-predcom.o \
 	tree-pretty-print.o \
 	tree-profile.o \
@@ -1409,7 +1447,6 @@ OBJS = \
 	tree-ssa-ccp.o \
 	tree-ssa-coalesce.o \
 	tree-ssa-copy.o \
-	tree-ssa-copyrename.o \
 	tree-ssa-dce.o \
 	tree-ssa-dom.o \
 	tree-ssa-dse.o \
@@ -1433,6 +1470,7 @@ OBJS = \
 	tree-ssa-propagate.o \
 	tree-ssa-reassoc.o \
 	tree-ssa-sccvn.o \
+	tree-ssa-scopedtables.o \
 	tree-ssa-sink.o \
 	tree-ssa-strlen.o \
 	tree-ssa-structalias.o \
@@ -1477,7 +1515,7 @@ OBJS = \
 # Objects in libcommon.a, potentially used by all host binaries and with
 # no target dependencies.
 OBJS-libcommon = diagnostic.o diagnostic-color.o pretty-print.o intl.o \
-	vec.o  input.o version.o
+	vec.o input.o version.o hash-table.o ggc-none.o
 
 # Objects in libcommon-target.a, used by drivers and by the core
 # compiler and containing target-dependent code.
@@ -1489,20 +1527,24 @@ OBJS-libcommon-target = $(common_out_object_file) prefix.o params.o \
 ALL_HOST_FRONTEND_OBJS = $(foreach v,$(CONFIG_LANGUAGES),$($(v)_OBJS))
 
 ALL_HOST_BACKEND_OBJS = $(GCC_OBJS) $(OBJS) $(OBJS-libcommon) \
-  $(OBJS-libcommon-target) @TREEBROWSER@ main.o c-family/cppspec.o \
+  $(OBJS-libcommon-target) main.o c-family/cppspec.o \
   $(COLLECT2_OBJS) $(EXTRA_GCC_OBJS) $(GCOV_OBJS) $(GCOV_DUMP_OBJS) \
-  $(GCOV_TOOL_OBJS) lto-wrapper.o collect-utils.o
+  $(GCOV_TOOL_OBJS) $(GENGTYPE_OBJS) gcc-ar.o gcc-nm.o gcc-ranlib.o \
+  lto-wrapper.o collect-utils.o
 
 # This lists all host object files, whether they are included in this
 # compilation or not.
 ALL_HOST_OBJS = $(ALL_HOST_FRONTEND_OBJS) $(ALL_HOST_BACKEND_OBJS)
 
-BACKEND = libbackend.a main.o @TREEBROWSER@ libcommon-target.a libcommon.a \
+BACKEND = libbackend.a main.o libcommon-target.a libcommon.a \
 	$(CPPLIB) $(LIBDECNUMBER)
 
 # This is defined to "yes" if Tree checking is enabled, which roughly means
 # front-end checking.
 TREECHECKING = @TREECHECKING@
+
+# The full name of the driver on installation
+FULL_DRIVER_NAME=$(target_noncanonical)-gcc-$(version)$(exeext)
 
 MOSTLYCLEANFILES = insn-flags.h insn-config.h insn-codes.h \
  insn-output.c insn-recog.c insn-emit.c insn-extract.c insn-peep.c \
@@ -1511,7 +1553,7 @@ MOSTLYCLEANFILES = insn-flags.h insn-config.h insn-codes.h \
  tm-preds.h tm-constrs.h checksum-options gimple-match.c generic-match.c \
  tree-check.h min-insn-modes.c insn-modes.c insn-modes.h \
  genrtl.h gt-*.h gtype-*.h gtype-desc.c gtyp-input.list \
- xgcc$(exeext) cpp$(exeext) \
+ xgcc$(exeext) cpp$(exeext) $(FULL_DRIVER_NAME) \
  $(EXTRA_PROGRAMS) gcc-cross$(exeext) \
  $(SPECS) collect2$(exeext) gcc-ar$(exeext) gcc-nm$(exeext) \
  gcc-ranlib$(exeext) \
@@ -1519,6 +1561,13 @@ MOSTLYCLEANFILES = insn-flags.h insn-config.h insn-codes.h \
  gcov-tool$(exeect) \
  gengtype$(exeext) *.[0-9][0-9].* *.[si] *-checksum.c libbackend.a \
  libcommon-target.a libcommon.a libgcc.mk
+
+# This symlink makes the full installation name of the driver be available
+# from within the *build* directory, for use when running the JIT library
+# from there (e.g. when running its testsuite).
+$(FULL_DRIVER_NAME): ./xgcc
+	rm -f $@
+	$(LN_S) $< $@
 
 #
 # Language makefile fragments.
@@ -1673,6 +1722,7 @@ aclocal_deps = \
 	$(srcdir)/../config/codeset.m4 \
 	$(srcdir)/../config/extensions.m4 \
 	$(srcdir)/../config/gettext-sister.m4 \
+	$(srcdir)/../config/gcc-plugin.m4 \
 	$(srcdir)/../config/iconv.m4 \
 	$(srcdir)/../config/lcmessage.m4 \
 	$(srcdir)/../config/lib-ld.m4 \
@@ -1824,6 +1874,12 @@ libgcc.mvars: config.status Makefile specs xgcc$(exeext)
 	echo GCC_CFLAGS = '$(GCC_CFLAGS)' >> tmp-libgcc.mvars
 	echo INHIBIT_LIBC_CFLAGS = '$(INHIBIT_LIBC_CFLAGS)' >> tmp-libgcc.mvars
 	echo TARGET_SYSTEM_ROOT = '$(TARGET_SYSTEM_ROOT)' >> tmp-libgcc.mvars
+	if test @enable_default_pie@ = yes; then \
+	  NO_PIE_CFLAGS="-fno-PIE"; \
+	else \
+	  NO_PIE_CFLAGS=; \
+	fi; \
+	echo NO_PIE_CFLAGS = "$$NO_PIE_CFLAGS" >> tmp-libgcc.mvars
 
 	mv tmp-libgcc.mvars libgcc.mvars
 
@@ -1901,7 +1957,7 @@ gcc-nm.c: gcc-ar.c
 	cp $^ $@
 
 COLLECT2_OBJS = collect2.o collect2-aix.o tlink.o vec.o ggc-none.o \
-  collect-utils.o file-find.o
+  collect-utils.o file-find.o hash-table.o
 COLLECT2_LIBS = @COLLECT2_LIBS@
 collect2$(exeext): $(COLLECT2_OBJS) $(LIBDEPS)
 # Don't try modifying collect2 (aka ld) in place--it might be linking this.
@@ -1941,9 +1997,11 @@ DRIVER_DEFINES = \
   -DSTANDARD_EXEC_PREFIX=\"$(libdir)/gcc/\" \
   -DSTANDARD_LIBEXEC_PREFIX=\"$(libexecdir)/gcc/\" \
   -DDEFAULT_TARGET_VERSION=\"$(version)\" \
+  -DDEFAULT_REAL_TARGET_MACHINE=\"$(real_target_noncanonical)\" \
   -DDEFAULT_TARGET_MACHINE=\"$(target_noncanonical)\" \
   -DSTANDARD_BINDIR_PREFIX=\"$(bindir)/\" \
   -DTOOLDIR_BASE_PREFIX=\"$(libsubdir_to_prefix)$(prefix_to_exec_prefix)\" \
+  -DACCEL_DIR_SUFFIX=\"$(accel_dir_suffix)\" \
   @TARGET_SYSTEM_ROOT_DEFINE@ \
   $(VALGRIND_DRIVER_DEFINES) \
   $(if $(SHLIB),$(if $(filter yes,@enable_shared@),-DENABLE_SHARED_LIBGCC)) \
@@ -2025,7 +2083,8 @@ $(common_out_object_file): $(common_out_file)
 .PRECIOUS: insn-config.h insn-flags.h insn-codes.h insn-constants.h \
   insn-emit.c insn-recog.c insn-extract.c insn-output.c insn-peep.c \
   insn-attr.h insn-attr-common.h insn-attrtab.c insn-dfatab.c \
-  insn-latencytab.c insn-preds.c gimple-match.c generic-match.c
+  insn-latencytab.c insn-preds.c gimple-match.c generic-match.c \
+  insn-target-def.h
 
 # Dependencies for the md file.  The first time through, we just assume
 # the md file itself and the generated dependency file (in order to get
@@ -2046,7 +2105,7 @@ s-mddeps: $(md_file) $(MD_INCLUDES) build/genmddeps$(build_exeext)
 # the target file.
 
 simple_rtl_generated_h	= insn-attr.h insn-attr-common.h insn-codes.h \
-			  insn-config.h insn-flags.h
+			  insn-config.h insn-flags.h insn-target-def.h
 
 simple_rtl_generated_c	= insn-automata.c insn-emit.c \
 			  insn-extract.c insn-output.c \
@@ -2256,7 +2315,7 @@ GTFILES = $(CPP_ID_DATA_H) $(srcdir)/input.h $(srcdir)/coretypes.h \
   $(srcdir)/libfuncs.h $(SYMTAB_H) \
   $(srcdir)/real.h $(srcdir)/function.h $(srcdir)/insn-addr.h $(srcdir)/hwint.h \
   $(srcdir)/fixed-value.h \
-  $(srcdir)/output.h $(srcdir)/cfgloop.h \
+  $(srcdir)/output.h $(srcdir)/cfgloop.h $(srcdir)/cfg.h \
   $(srcdir)/cselib.h $(srcdir)/basic-block.h  $(srcdir)/ipa-ref.h $(srcdir)/cgraph.h \
   $(srcdir)/reload.h $(srcdir)/caller-save.c $(srcdir)/symtab.c \
   $(srcdir)/alias.c $(srcdir)/bitmap.c $(srcdir)/cselib.c $(srcdir)/cgraph.c \
@@ -2268,7 +2327,7 @@ GTFILES = $(CPP_ID_DATA_H) $(srcdir)/input.h $(srcdir)/coretypes.h \
   $(srcdir)/dwarf2cfi.c \
   $(srcdir)/dwarf2out.c \
   $(srcdir)/tree-vect-generic.c \
-  $(srcdir)/dojump.c \
+  $(srcdir)/dojump.c $(srcdir)/emit-rtl.h \
   $(srcdir)/emit-rtl.c $(srcdir)/except.h $(srcdir)/explow.c $(srcdir)/expr.c \
   $(srcdir)/expr.h \
   $(srcdir)/function.c $(srcdir)/except.c \
@@ -2280,6 +2339,7 @@ GTFILES = $(CPP_ID_DATA_H) $(srcdir)/input.h $(srcdir)/coretypes.h \
   $(srcdir)/stringpool.c $(srcdir)/tree.c $(srcdir)/varasm.c \
   $(srcdir)/gimple.h \
   $(srcdir)/gimple-ssa.h \
+  $(srcdir)/tree-chkp.c \
   $(srcdir)/tree-ssanames.c $(srcdir)/tree-eh.c $(srcdir)/tree-ssa-address.c \
   $(srcdir)/tree-cfg.c \
   $(srcdir)/tree-dfa.c \
@@ -2288,8 +2348,8 @@ GTFILES = $(CPP_ID_DATA_H) $(srcdir)/input.h $(srcdir)/coretypes.h \
   $(srcdir)/tree-scalar-evolution.c \
   $(srcdir)/tree-ssa-operands.h \
   $(srcdir)/tree-profile.c $(srcdir)/tree-nested.c \
-  $(srcdir)/tree-parloops.c \
   $(srcdir)/omp-low.c \
+  $(srcdir)/omp-low.h \
   $(srcdir)/targhooks.c $(out_file) $(srcdir)/passes.c $(srcdir)/cgraphunit.c \
   $(srcdir)/cgraphclones.c \
   $(srcdir)/tree-phinodes.c \
@@ -2304,6 +2364,7 @@ GTFILES = $(CPP_ID_DATA_H) $(srcdir)/input.h $(srcdir)/coretypes.h \
   $(srcdir)/asan.c \
   $(srcdir)/ubsan.c \
   $(srcdir)/tsan.c \
+  $(srcdir)/sanopt.c \
   $(srcdir)/ipa-devirt.c \
   $(srcdir)/internal-fn.h \
   @all_gtfiles@
@@ -2398,6 +2459,8 @@ build/vec.o : vec.c $(BCONFIG_H) $(SYSTEM_H) coretypes.h $(VEC_H)	\
    $(GGC_H) toplev.h $(DIAGNOSTIC_CORE_H)
 build/hash-table.o : hash-table.c $(BCONFIG_H) $(SYSTEM_H) coretypes.h  \
    $(HASH_TABLE_H) $(GGC_H) toplev.h $(DIAGNOSTIC_CORE_H)
+build/inchash.o : inchash.c $(BCONFIG_H) $(SYSTEM_H) coretypes.h  \
+   $(HASHTAB_H) inchash.h
 build/gencondmd.o : build/gencondmd.c $(BCONFIG_H) $(SYSTEM_H)		\
   coretypes.h $(GTM_H) insn-constants.h					\
   $(filter-out insn-flags.h, $(RTL_H) $(TM_P_H) $(FUNCTION_H) $(REGS_H) \
@@ -2441,6 +2504,9 @@ build/genextract.o : genextract.c $(RTL_BASE_H) $(BCONFIG_H)		\
   $(SYSTEM_H) coretypes.h $(GTM_H) errors.h $(READ_MD_H) gensupport.h
 build/genflags.o : genflags.c $(RTL_BASE_H) $(OBSTACK_H) $(BCONFIG_H)	\
   $(SYSTEM_H) coretypes.h $(GTM_H) errors.h $(READ_MD_H) gensupport.h
+build/gentarget-def.o : gentarget-def.c $(BCONFIG_H) $(SYSTEM_H)	\
+  coretypes.h $(GTM_H) $(RTL_BASE_H) errors.h $(READ_MD_H) gensupport.h	\
+  $(HASH_TABLE_H) target-insns.def
 build/gengenrtl.o : gengenrtl.c $(BCONFIG_H) $(SYSTEM_H) rtl.def
 
 # The gengtype generator program is special: Two versions are built.
@@ -2451,29 +2517,30 @@ build/gengenrtl.o : gengenrtl.c $(BCONFIG_H) $(SYSTEM_H) rtl.def
 # on BCONFIG_H.  For the build objects, add -DGENERATOR_FILE manually,
 # the build-%: rule doesn't apply to them.
 
+GENGTYPE_OBJS = gengtype.o gengtype-parse.o gengtype-state.o \
+  gengtype-lex.o errors.o
+
 gengtype-lex.o build/gengtype-lex.o : gengtype-lex.c gengtype.h $(SYSTEM_H)
-gengtype-lex.o: $(CONFIG_H) $(BCONFIG_H)
-CFLAGS-gengtype-lex.o += -DGENERATOR_FILE
+CFLAGS-gengtype-lex.o += -DHOST_GENERATOR_FILE
 build/gengtype-lex.o: $(BCONFIG_H)
 
 gengtype-parse.o build/gengtype-parse.o : gengtype-parse.c gengtype.h \
   $(SYSTEM_H)
-gengtype-parse.o: $(CONFIG_H)
-CFLAGS-gengtype-parse.o += -DGENERATOR_FILE
+CFLAGS-gengtype-parse.o += -DHOST_GENERATOR_FILE
 build/gengtype-parse.o: $(BCONFIG_H)
 
 gengtype-state.o build/gengtype-state.o: gengtype-state.c $(SYSTEM_H) \
   gengtype.h errors.h double-int.h version.h $(HASHTAB_H) $(OBSTACK_H) \
   $(XREGEX_H)
-gengtype-state.o: $(CONFIG_H)
-CFLAGS-gengtype-state.o += -DGENERATOR_FILE
+CFLAGS-gengtype-state.o += -DHOST_GENERATOR_FILE
 build/gengtype-state.o: $(BCONFIG_H)
 gengtype.o build/gengtype.o : gengtype.c $(SYSTEM_H) gengtype.h 	\
   rtl.def insn-notes.def errors.h double-int.h version.h     		\
   $(HASHTAB_H) $(OBSTACK_H) $(XREGEX_H)
-gengtype.o: $(CONFIG_H)
-CFLAGS-gengtype.o += -DGENERATOR_FILE
+CFLAGS-gengtype.o += -DHOST_GENERATOR_FILE
 build/gengtype.o: $(BCONFIG_H)
+
+CFLAGS-errors.o += -DHOST_GENERATOR_FILE
 
 build/genmddeps.o: genmddeps.c $(BCONFIG_H) $(SYSTEM_H) coretypes.h	\
   errors.h $(READ_MD_H)
@@ -2488,13 +2555,14 @@ build/genpeep.o : genpeep.c $(RTL_BASE_H) $(BCONFIG_H) $(SYSTEM_H)	\
 build/genpreds.o : genpreds.c $(RTL_BASE_H) $(BCONFIG_H) $(SYSTEM_H)	\
   coretypes.h $(GTM_H) errors.h $(READ_MD_H) gensupport.h $(OBSTACK_H)
 build/genrecog.o : genrecog.c $(RTL_BASE_H) $(BCONFIG_H) $(SYSTEM_H)	\
-  coretypes.h $(GTM_H) errors.h $(READ_MD_H) gensupport.h
+  coretypes.h $(GTM_H) errors.h $(READ_MD_H) gensupport.h		\
+  $(HASH_TABLE_H) inchash.h
 build/genhooks.o : genhooks.c $(TARGET_DEF) $(C_TARGET_DEF)		\
   $(COMMON_TARGET_DEF) $(BCONFIG_H) $(SYSTEM_H) errors.h
 build/genmddump.o : genmddump.c $(RTL_BASE_H) $(BCONFIG_H) $(SYSTEM_H)	\
   coretypes.h $(GTM_H) errors.h $(READ_MD_H) gensupport.h
 build/genmatch.o : genmatch.c $(BCONFIG_H) $(SYSTEM_H) \
-  coretypes.h errors.h
+  coretypes.h errors.h $(HASH_TABLE_H) hash-map.h $(GGC_H)
 
 # Compile the programs that generate insn-* from the machine description.
 # They are compiled with $(COMPILER_FOR_BUILD), and associated libraries,
@@ -2503,7 +2571,7 @@ build/genmatch.o : genmatch.c $(BCONFIG_H) $(SYSTEM_H) \
 
 # All these programs use the RTL reader ($(BUILD_RTL)).
 genprogrtl = attr attr-common attrtab automata codes conditions config emit \
-	     extract flags opinit output peep preds recog mddump
+	     extract flags mddump opinit output peep preds recog target-def
 $(genprogrtl:%=build/gen%$(build_exeext)): $(BUILD_RTL)
 
 # All these programs use the MD reader ($(BUILD_MD)).
@@ -2519,6 +2587,8 @@ genprog = $(genprogerr) check checksum condmd match
 
 # These programs need libs over and above what they get from the above list.
 build/genautomata$(build_exeext) : BUILD_LIBS += -lm
+
+build/genrecog$(build_exeext) : build/hash-table.o build/inchash.o
 
 # For stage1 and when cross-compiling use the build libcpp which is
 # built with NLS disabled.  For stage2+ use the host library and
@@ -2605,10 +2675,12 @@ s-iov: build/gcov-iov$(build_exeext) $(BASEVER) $(DEVPHASE)
 
 GCOV_OBJS = gcov.o
 gcov$(exeext): $(GCOV_OBJS) $(LIBDEPS)
-	+$(LINKER) $(ALL_LINKERFLAGS) $(LDFLAGS) $(GCOV_OBJS) $(LIBS) -o $@
+	+$(LINKER) $(ALL_LINKERFLAGS) $(LDFLAGS) $(GCOV_OBJS) \
+		hash-table.o ggc-none.o $(LIBS) -o $@
 GCOV_DUMP_OBJS = gcov-dump.o
 gcov-dump$(exeext): $(GCOV_DUMP_OBJS) $(LIBDEPS)
 	+$(LINKER) $(ALL_LINKERFLAGS) $(LDFLAGS) $(GCOV_DUMP_OBJS) \
+		hash-table.o ggc-none.o\
 		$(LIBS) -o $@
 
 GCOV_TOOL_DEP_FILES = $(srcdir)/../libgcc/libgcov-util.c gcov-io.c $(GCOV_IO_H) \
@@ -2853,9 +2925,7 @@ TEXI_GCC_FILES = gcc.texi gcc-common.texi gcc-vers.texi frontends.texi	\
 	 gcov.texi trouble.texi bugreport.texi service.texi		\
 	 contribute.texi compat.texi funding.texi gnu.texi gpl_v3.texi	\
 	 fdl.texi contrib.texi cppenv.texi cppopts.texi avr-mmcu.texi	\
-	 implement-c.texi implement-cxx.texi arm-neon-intrinsics.texi	\
-	 arm-acle-intrinsics.texi aarch64-acle-intrinsics.texi          \
-	 gcov-tool.texi
+	 implement-c.texi implement-cxx.texi gcov-tool.texi
 
 # we explicitly use $(srcdir)/doc/tm.texi here to avoid confusion with
 # the generated tm.texi; the latter might have a more recent timestamp,
@@ -3003,7 +3073,7 @@ doc/%.7: %.pod
 	$(STAMP) $@
 	-$(TEXI2POD) -DBUGURL="$(BUGURL_TEXI)" $< > $@
 
-.INTERMEDIATE: cpp.pod gcc.pod gfdl.pod fsf-funding.pod
+.INTERMEDIATE: cpp.pod gcc.pod gfdl.pod fsf-funding.pod gpl.pod
 cpp.pod: cpp.texi cppenv.texi cppopts.texi
 
 # These next rules exist because the output name is not the same as
@@ -3148,12 +3218,14 @@ install-strip: install
 
 # Handle cpp installation.
 install-cpp: installdirs cpp$(exeext)
-	-rm -f $(DESTDIR)$(bindir)/$(CPP_INSTALL_NAME)$(exeext)
-	-$(INSTALL_PROGRAM) -m 755 cpp$(exeext) $(DESTDIR)$(bindir)/$(CPP_INSTALL_NAME)$(exeext)
-	-if [ x$(cpp_install_dir) != x ]; then \
-	  rm -f $(DESTDIR)$(prefix)/$(cpp_install_dir)/$(CPP_INSTALL_NAME)$(exeext); \
-	  $(INSTALL_PROGRAM) -m 755 cpp$(exeext) $(DESTDIR)$(prefix)/$(cpp_install_dir)/$(CPP_INSTALL_NAME)$(exeext); \
-	else true; fi
+	-if test "$(enable_as_accelerator)" != "yes" ; then \
+	  rm -f $(DESTDIR)$(bindir)/$(CPP_INSTALL_NAME)$(exeext); \
+	  $(INSTALL_PROGRAM) -m 755 cpp$(exeext) $(DESTDIR)$(bindir)/$(CPP_INSTALL_NAME)$(exeext); \
+	  if [ x$(cpp_install_dir) != x ]; then \
+	    rm -f $(DESTDIR)$(prefix)/$(cpp_install_dir)/$(CPP_INSTALL_NAME)$(exeext); \
+	    $(INSTALL_PROGRAM) -m 755 cpp$(exeext) $(DESTDIR)$(prefix)/$(cpp_install_dir)/$(CPP_INSTALL_NAME)$(exeext); \
+	  else true; fi; \
+	fi
 
 # Create the installation directories.
 # $(libdir)/gcc/include isn't currently searched by cpp.
@@ -3192,7 +3264,8 @@ PLUGIN_HEADERS = $(TREE_H) $(CONFIG_H) $(SYSTEM_H) coretypes.h $(TM_H) \
   tree-ssa-loop.h tree-ssa-loop-ivopts.h tree-ssa-loop-manip.h \
   tree-ssa-loop-niter.h tree-ssa-ter.h tree-ssa-threadedge.h \
   tree-ssa-threadupdate.h inchash.h wide-int.h signop.h hash-map.h \
-  hash-set.h pass-instances.def
+  hash-set.h dominance.h cfg.h cfgrtl.h cfganal.h cfgbuild.h cfgcleanup.h \
+  lcm.h cfgloopmanip.h builtins.def chkp-builtins.def pass-instances.def
 
 # generate the 'build fragment' b-header-vars
 s-header-vars: Makefile
@@ -3218,7 +3291,7 @@ install-plugin: installdirs lang.install-plugin s-header-vars install-gengtype
 # We keep the directory structure for files in config or c-family and .def
 # files. All other files are flattened to a single directory.
 	$(mkinstalldirs) $(DESTDIR)$(plugin_includedir)
-	headers=`echo $(PLUGIN_HEADERS) | tr ' ' '\012' | sort -u`; \
+	headers=`echo $(PLUGIN_HEADERS) $$(cd $(srcdir); echo *.h *.def) | tr ' ' '\012' | sort -u`; \
 	srcdirstrip=`echo "$(srcdir)" | sed 's/[].[^$$\\*|]/\\\\&/g'`; \
 	for file in $$headers; do \
 	  if [ -f $$file ] ; then \
@@ -3261,17 +3334,21 @@ install-common: native lang.install-common installdirs
 # otherwise override the specs built into the driver.
 	rm -f $(DESTDIR)$(libsubdir)/specs
 # Install gcov if it was compiled.
-	-if [ -f gcov$(exeext) ]; \
-	then \
+	-if test "$(enable_as_accelerator)" != "yes" ; then \
+	  if [ -f gcov$(exeext) ]; \
+	  then \
 	    rm -f $(DESTDIR)$(bindir)/$(GCOV_INSTALL_NAME)$(exeext); \
 	    $(INSTALL_PROGRAM) gcov$(exeext) $(DESTDIR)$(bindir)/$(GCOV_INSTALL_NAME)$(exeext); \
+	  fi; \
 	fi
 # Install gcov-tool if it was compiled.
-	-if [ -f gcov-tool$(exeext) ]; \
-	then \
+	-if test "$(enable_as_accelerator)" != "yes" ; then \
+	  if [ -f gcov-tool$(exeext) ]; \
+	  then \
 	    rm -f $(DESTDIR)$(bindir)/$(GCOV_TOOL_INSTALL_NAME)$(exeext); \
 	    $(INSTALL_PROGRAM) \
 	    gcov-tool$(exeext) $(DESTDIR)$(bindir)/$(GCOV_TOOL_INSTALL_NAME)$(exeext); \
+	  fi; \
 	fi
 
 # Install the driver program as $(target_noncanonical)-gcc,
@@ -3279,17 +3356,19 @@ install-common: native lang.install-common installdirs
 install-driver: installdirs xgcc$(exeext)
 	-rm -f $(DESTDIR)$(bindir)/$(GCC_INSTALL_NAME)$(exeext)
 	-$(INSTALL_PROGRAM) xgcc$(exeext) $(DESTDIR)$(bindir)/$(GCC_INSTALL_NAME)$(exeext)
-	-if [ "$(GCC_INSTALL_NAME)" != "$(target_noncanonical)-gcc-$(version)" ]; then \
-	  rm -f $(DESTDIR)$(bindir)/$(target_noncanonical)-gcc-$(version)$(exeext); \
-	  ( cd $(DESTDIR)$(bindir) && \
-	    $(LN) $(GCC_INSTALL_NAME)$(exeext) $(target_noncanonical)-gcc-$(version)$(exeext) ); \
-	fi
-	-if [ ! -f gcc-cross$(exeext) ] \
-	    && [ "$(GCC_INSTALL_NAME)" != "$(GCC_TARGET_INSTALL_NAME)" ]; then \
-	  rm -f $(DESTDIR)$(bindir)/$(target_noncanonical)-gcc-tmp$(exeext); \
-	  ( cd $(DESTDIR)$(bindir) && \
-	    $(LN) $(GCC_INSTALL_NAME)$(exeext) $(target_noncanonical)-gcc-tmp$(exeext) && \
-	    mv -f $(target_noncanonical)-gcc-tmp$(exeext) $(GCC_TARGET_INSTALL_NAME)$(exeext) ); \
+	-if test "$(enable_as_accelerator)" != "yes" ; then \
+	  if [ "$(GCC_INSTALL_NAME)" != "$(target_noncanonical)-gcc-$(version)" ]; then \
+	    rm -f $(DESTDIR)$(bindir)/$(FULL_DRIVER_NAME); \
+	    ( cd $(DESTDIR)$(bindir) && \
+	      $(LN) $(GCC_INSTALL_NAME)$(exeext) $(FULL_DRIVER_NAME) ); \
+	  fi; \
+	  if [ ! -f gcc-cross$(exeext) ] \
+	      && [ "$(GCC_INSTALL_NAME)" != "$(GCC_TARGET_INSTALL_NAME)" ]; then \
+	    rm -f $(DESTDIR)$(bindir)/$(target_noncanonical)-gcc-tmp$(exeext); \
+	    ( cd $(DESTDIR)$(bindir) && \
+	      $(LN) $(GCC_INSTALL_NAME)$(exeext) $(target_noncanonical)-gcc-tmp$(exeext) && \
+	      mv -f $(target_noncanonical)-gcc-tmp$(exeext) $(GCC_TARGET_INSTALL_NAME)$(exeext) ); \
+	  fi; \
 	fi
 
 # Install the info files.
@@ -3486,19 +3565,21 @@ install-lto-wrapper: lto-wrapper$(exeext)
 	$(INSTALL_PROGRAM) lto-wrapper$(exeext) $(DESTDIR)$(libexecsubdir)/lto-wrapper$(exeext)
 
 install-gcc-ar: installdirs gcc-ar$(exeext) gcc-nm$(exeext) gcc-ranlib$(exeext)
-	for i in gcc-ar gcc-nm gcc-ranlib; do \
-	  install_name=`echo $$i|sed '$(program_transform_name)'` ;\
-	  target_install_name=$(target_noncanonical)-`echo $$i|sed '$(program_transform_name)'` ; \
-	  rm -f $(DESTDIR)$(bindir)/$$install_name$(exeext) ; \
-	  $(INSTALL_PROGRAM) $$i$(exeext) $(DESTDIR)$(bindir)/$$install_name$(exeext) ;\
-	  if test -f gcc-cross$(exeext); then \
-	    :; \
-	  else \
-	    rm -f $(DESTDIR)$(bindir)/$$target_install_name$(exeext); \
-	    ( cd $(DESTDIR)$(bindir) && \
-	      $(LN) $$install_name$(exeext) $$target_install_name$(exeext) ) ; \
-	  fi ; \
-	done
+	if test "$(enable_as_accelerator)" != "yes" ; then \
+	  for i in gcc-ar gcc-nm gcc-ranlib; do \
+	    install_name=`echo $$i|sed '$(program_transform_name)'` ;\
+	    target_install_name=$(target_noncanonical)-`echo $$i|sed '$(program_transform_name)'` ; \
+	    rm -f $(DESTDIR)$(bindir)/$$install_name$(exeext) ; \
+	    $(INSTALL_PROGRAM) $$i$(exeext) $(DESTDIR)$(bindir)/$$install_name$(exeext) ;\
+	    if test -f gcc-cross$(exeext); then \
+	      :; \
+	    else \
+	      rm -f $(DESTDIR)$(bindir)/$$target_install_name$(exeext); \
+	      ( cd $(DESTDIR)$(bindir) && \
+		$(LN) $$install_name$(exeext) $$target_install_name$(exeext) ) ; \
+	    fi ; \
+	  done; \
+	fi
 
 # Cancel installation by deleting the installed files.
 uninstall: lang.uninstall
@@ -3561,9 +3642,6 @@ site.exp: ./config.status Makefile
 	  echo "set PLUGINCC \"$(PLUGINCC)\"" >> ./site.tmp; \
 	  echo "set PLUGINCFLAGS \"$(PLUGINCFLAGS)\"" >> ./site.tmp; \
 	  echo "set GMPINC \"$(GMPINC)\"" >> ./site.tmp; \
-	fi
-	@if test "@enable_lto@" = "yes" ; then \
-	  echo "set ENABLE_LTO 1" >> ./site.tmp; \
 	fi
 # If newlib has been configured, we need to pass -B to gcc so it can find
 # newlib's crt0.o if it exists.  This will cause a "path prefix not used"
@@ -3687,7 +3765,9 @@ check_p_subdirs=$(wordlist 1,$(check_p_count),$(wordlist 1, \
 #
 # To parallelize some language check, add the corresponding check-$lang
 # to lang_checks_parallelized variable and define check_$lang_parallelize
-# variable (see above check_gcc_parallelize description).
+# variable.  This is the upper limit to which it is useful to parallelize the
+# check-$lang target.  It doesn't make sense to try e.g. 128 goals for small
+# testsuites like objc or go.
 $(lang_checks_parallelized): check-% : site.exp
 	-rm -rf $(TESTSUITEDIR)/$*-parallel
 	@if [ "$(filter -j, $(MFLAGS))" = "-j" ]; then \

@@ -1,5 +1,5 @@
 /* Decimal floating point support.
-   Copyright (C) 2005-2014 Free Software Foundation, Inc.
+   Copyright (C) 2005-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,10 +21,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "tm_p.h"
 #include "dfp.h"
-#include "wide-int.h"
 
 /* The order of the following headers is important for making sure
    decNumber structure is large enough to hold decimal128 digits.  */
@@ -343,7 +343,7 @@ decode_decimal128 (const struct real_format *fmt ATTRIBUTE_UNUSED,
 
 static void
 decimal_to_binary (REAL_VALUE_TYPE *to, const REAL_VALUE_TYPE *from,
-		   enum machine_mode mode)
+		   machine_mode mode)
 {
   char string[256];
   const decimal128 *const d128 = (const decimal128 *) from->sig;
@@ -459,7 +459,7 @@ decimal_round_for_format (const struct real_format *fmt, REAL_VALUE_TYPE *r)
    binary and decimal types.  */
 
 void
-decimal_real_convert (REAL_VALUE_TYPE *r, enum machine_mode mode,
+decimal_real_convert (REAL_VALUE_TYPE *r, machine_mode mode,
 		      const REAL_VALUE_TYPE *a)
 {
   const struct real_format *fmt = REAL_MODE_FORMAT (mode);
@@ -720,7 +720,7 @@ decimal_real_arithmetic (REAL_VALUE_TYPE *r, enum tree_code code,
    If SIGN is nonzero, R is set to the most negative finite value.  */
 
 void
-decimal_real_maxval (REAL_VALUE_TYPE *r, int sign, enum machine_mode mode)
+decimal_real_maxval (REAL_VALUE_TYPE *r, int sign, machine_mode mode)
 {
   const char *max;
 

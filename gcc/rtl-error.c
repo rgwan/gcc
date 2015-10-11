@@ -1,5 +1,5 @@
 /* RTL specific diagnostic subroutines for GCC
-   Copyright (C) 2001-2014 Free Software Foundation, Inc.
+   Copyright (C) 2001-2015 Free Software Foundation, Inc.
    Contributed by Gabriel Dos Reis <gdr@codesourcery.com>
 
 This file is part of GCC.
@@ -25,7 +25,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "rtl-error.h"
 #include "insn-attr.h"
 #include "insn-config.h"
-#include "input.h"
 #include "intl.h"
 #include "diagnostic.h"
 

@@ -1,6 +1,6 @@
 /* Handle the hair of processing (but not expanding) inline functions.
    Also manage function and variable name overloading.
-   Copyright (C) 1987-2014 Free Software Foundation, Inc.
+   Copyright (C) 1987-2015 Free Software Foundation, Inc.
    Contributed by Michael Tiemann (tiemann@cygnus.com)
 
 This file is part of GCC.
@@ -25,6 +25,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "stringpool.h"
 #include "varasm.h"
@@ -35,6 +36,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "target.h"
 #include "common/common-target.h"
 #include "diagnostic.h"
+#include "hard-reg-set.h"
+#include "function.h"
 #include "cgraph.h"
 
 /* Various flags to control the mangling process.  */
@@ -52,8 +55,6 @@ enum mangling_flags
      just `XX') if the value has more than one digit.  */
   mf_use_underscores_around_value = 2
 };
-
-typedef enum mangling_flags mangling_flags;
 
 static void do_build_copy_assign (tree);
 static void do_build_copy_constructor (tree);
@@ -402,20 +403,6 @@ use_thunk (tree thunk_fndecl, bool emit_p)
   if (DECL_ONE_ONLY (function))
     thunk_node->add_to_same_comdat_group (funcn);
 
-  if (!this_adjusting
-      || !targetm.asm_out.can_output_mi_thunk (thunk_fndecl, fixed_offset,
-					       virtual_value, alias))
-    {
-      /* If this is a covariant thunk, or we don't have the necessary
-	 code for efficient thunks, generate a thunk function that
-	 just makes a call to the real function.  Unfortunately, this
-	 doesn't work for varargs.  */
-
-      if (varargs_function_p (function))
-	error ("generic thunk code fails for method %q#D which uses %<...%>",
-	       function);
-    }
-
   pop_from_top_level ();
 }
 
@@ -484,6 +471,8 @@ type_set_nontrivial_flag (tree ctype, special_function_kind sfk)
 bool
 trivial_fn_p (tree fn)
 {
+  if (TREE_CODE (fn) == TEMPLATE_DECL)
+    return false;
   if (!DECL_DEFAULTED_FN (fn))
     return false;
 
@@ -1147,8 +1136,8 @@ process_subob_fn (tree fn, tree *spec_p, bool *trivial_p,
       *constexpr_p = false;
       if (diag)
 	{
-	  inform (0, "defaulted constructor calls non-constexpr "
-		  "%q+D", fn);
+	  inform (DECL_SOURCE_LOCATION (fn),
+		  "defaulted constructor calls non-constexpr %qD", fn);
 	  explain_invalid_constexpr_fn (fn);
 	}
     }
@@ -1208,7 +1197,8 @@ walk_field_subobs (tree fields, tree fnname, special_function_kind sfk,
 	  if (DECL_INITIAL (field))
 	    {
 	      if (diag && DECL_INITIAL (field) == error_mark_node)
-		inform (0, "initializer for %q+#D is invalid", field);
+		inform (DECL_SOURCE_LOCATION (field),
+			"initializer for %q#D is invalid", field);
 	      if (trivial_p)
 		*trivial_p = false;
 	      /* Core 1351: If the field has an NSDMI that could throw, the
@@ -1259,8 +1249,9 @@ walk_field_subobs (tree fields, tree fnname, special_function_kind sfk,
 	    {
 	      *constexpr_p = false;
 	      if (diag)
-		inform (0, "defaulted default constructor does not "
-			"initialize %q+#D", field);
+		inform (DECL_SOURCE_LOCATION (field),
+			"defaulted default constructor does not "
+			"initialize %q#D", field);
 	    }
 	}
       else if (sfk == sfk_copy_constructor)
@@ -1624,9 +1615,10 @@ maybe_explain_implicit_delete (tree decl)
 	       && (type_has_user_declared_move_constructor (ctype)
 		   || type_has_user_declared_move_assign (ctype)))
 	{
-	  inform (0, "%q+#D is implicitly declared as deleted because %qT "
-		 "declares a move constructor or move assignment operator",
-		 decl, ctype);
+	  inform (DECL_SOURCE_LOCATION (decl),
+		  "%q#D is implicitly declared as deleted because %qT "
+		  "declares a move constructor or move assignment operator",
+		  decl, ctype);
 	  informed = true;
 	}
       if (!informed)
@@ -1643,7 +1635,8 @@ maybe_explain_implicit_delete (tree decl)
 				   DECL_INHERITED_CTOR_BASE (decl), parms);
 	  if (deleted_p)
 	    {
-	      inform (0, "%q+#D is implicitly deleted because the default "
+	      inform (DECL_SOURCE_LOCATION (decl),
+		      "%q#D is implicitly deleted because the default "
 		      "definition would be ill-formed:", decl);
 	      synthesized_method_walk (ctype, sfk, const_p,
 				       NULL, NULL, NULL, NULL, true,
@@ -1923,10 +1916,19 @@ implicitly_declare_fn (special_function_kind kind, tree type,
   DECL_EXTERNAL (fn) = true;
   DECL_NOT_REALLY_EXTERN (fn) = 1;
   DECL_DECLARED_INLINE_P (fn) = 1;
-  DECL_COMDAT (fn) = 1;
   set_linkage_according_to_type (type, fn);
+  if (TREE_PUBLIC (fn))
+    DECL_COMDAT (fn) = 1;
   rest_of_decl_compilation (fn, toplevel_bindings_p (), at_eof);
   gcc_assert (!TREE_USED (fn));
+
+  /* Propagate constraints from the inherited constructor. */
+  if (flag_concepts && inherited_ctor)
+    if (tree orig_ci = get_constraints (inherited_ctor))
+      {
+        tree new_ci = copy_node (orig_ci);
+        set_constraints (fn, new_ci);
+      }
 
   /* Restore PROCESSING_TEMPLATE_DECL.  */
   processing_template_decl = saved_processing_template_decl;
@@ -2135,6 +2137,8 @@ lazily_declare_fn (special_function_kind sfk, tree type)
   tree fn;
   /* Whether or not the argument has a const reference type.  */
   bool const_p = false;
+
+  type = TYPE_MAIN_VARIANT (type);
 
   switch (sfk)
     {

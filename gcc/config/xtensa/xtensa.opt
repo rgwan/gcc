@@ -1,6 +1,6 @@
 ; Options for the Tensilica Xtensa port of the compiler.
 
-; Copyright (C) 2005-2014 Free Software Foundation, Inc.
+; Copyright (C) 2005-2015 Free Software Foundation, Inc.
 ;
 ; This file is part of GCC.
 ;
@@ -37,6 +37,10 @@ Automatically align branch targets to reduce branch penalties
 mtext-section-literals
 Target
 Intersperse literal pools with code in the text section
+
+mauto-litpools
+Target Report Mask(AUTO_LITPOOLS)
+Relax literals in assembler and place them automatically in the text section
 
 mserialize-volatile
 Target Report Mask(SERIALIZE_VOLATILE)

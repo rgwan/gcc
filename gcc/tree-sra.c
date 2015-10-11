@@ -1,7 +1,7 @@
 /* Scalar Replacement of Aggregates (SRA) converts some structure
    references into scalar references, exposing them to the scalar
    optimizers.
-   Copyright (C) 2008-2014 Free Software Foundation, Inc.
+   Copyright (C) 2008-2015 Free Software Foundation, Inc.
    Contributed by Martin Jambor <mjambor@suse.cz>
 
 This file is part of GCC.
@@ -74,39 +74,41 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "hash-map.h"
-#include "hash-table.h"
 #include "alloc-pool.h"
-#include "tm.h"
+#include "backend.h"
+#include "predict.h"
 #include "tree.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
+#include "gimple.h"
+#include "rtl.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "internal-fn.h"
 #include "tree-eh.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "stor-layout.h"
 #include "gimplify.h"
 #include "gimple-iterator.h"
 #include "gimplify-me.h"
 #include "gimple-walk.h"
-#include "bitmap.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
+#include "flags.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
 #include "tree-dfa.h"
 #include "tree-ssa.h"
 #include "tree-pass.h"
+#include "cgraph.h"
+#include "symbol-summary.h"
 #include "ipa-prop.h"
-#include "statistics.h"
 #include "params.h"
 #include "target.h"
-#include "flags.h"
 #include "dbgcnt.h"
 #include "tree-inline.h"
 #include "gimple-pretty-print.h"
@@ -275,7 +277,7 @@ typedef struct access *access_p;
 
 
 /* Alloc pool for allocating access structures.  */
-static alloc_pool access_pool;
+static object_allocator<struct access> access_pool ("SRA accesses", 16);
 
 /* A structure linking lhs and rhs accesses from an aggregate assignment.  They
    are used to propagate subaccesses from rhs to lhs as long as they don't
@@ -287,25 +289,23 @@ struct assign_link
 };
 
 /* Alloc pool for allocating assign link structures.  */
-static alloc_pool link_pool;
+static object_allocator<assign_link> assign_link_pool ("SRA links", 16);
 
 /* Base (tree) -> Vector (vec<access_p> *) map.  */
 static hash_map<tree, auto_vec<access_p> > *base_access_vec;
 
 /* Candidate hash table helpers.  */
 
-struct uid_decl_hasher : typed_noop_remove <tree_node>
+struct uid_decl_hasher : nofree_ptr_hash <tree_node>
 {
-  typedef tree_node value_type;
-  typedef tree_node compare_type;
-  static inline hashval_t hash (const value_type *);
-  static inline bool equal (const value_type *, const compare_type *);
+  static inline hashval_t hash (const tree_node *);
+  static inline bool equal (const tree_node *, const tree_node *);
 };
 
 /* Hash a tree in a uid_decl_map.  */
 
 inline hashval_t
-uid_decl_hasher::hash (const value_type *item)
+uid_decl_hasher::hash (const tree_node *item)
 {
   return item->decl_minimal.uid;
 }
@@ -313,7 +313,7 @@ uid_decl_hasher::hash (const value_type *item)
 /* Return true if the DECL_UID in both trees are equal.  */
 
 inline bool
-uid_decl_hasher::equal (const value_type *a, const compare_type *b)
+uid_decl_hasher::equal (const tree_node *a, const tree_node *b)
 {
   return (a->decl_minimal.uid == b->decl_minimal.uid);
 }
@@ -659,8 +659,6 @@ sra_initialize (void)
   should_scalarize_away_bitmap = BITMAP_ALLOC (NULL);
   cannot_scalarize_away_bitmap = BITMAP_ALLOC (NULL);
   gcc_obstack_init (&name_obstack);
-  access_pool = create_alloc_pool ("SRA accesses", sizeof (struct access), 16);
-  link_pool = create_alloc_pool ("SRA links", sizeof (struct assign_link), 16);
   base_access_vec = new hash_map<tree, auto_vec<access_p> >;
   memset (&sra_stats, 0, sizeof (sra_stats));
   encountered_apply_args = false;
@@ -678,8 +676,8 @@ sra_deinitialize (void)
   candidates = NULL;
   BITMAP_FREE (should_scalarize_away_bitmap);
   BITMAP_FREE (cannot_scalarize_away_bitmap);
-  free_alloc_pool (access_pool);
-  free_alloc_pool (link_pool);
+  access_pool.release ();
+  assign_link_pool.release ();
   obstack_free (&name_obstack, NULL);
 
   delete base_access_vec;
@@ -831,9 +829,8 @@ mark_parm_dereference (tree base, HOST_WIDE_INT dist, gimple stmt)
 static struct access *
 create_access_1 (tree base, HOST_WIDE_INT offset, HOST_WIDE_INT size)
 {
-  struct access *access;
+  struct access *access = access_pool.allocate ();
 
-  access = (struct access *) pool_alloc (access_pool);
   memset (access, 0, sizeof (struct access));
   access->base = base;
   access->offset = offset;
@@ -984,7 +981,7 @@ completely_scalarize_record (tree base, tree decl, HOST_WIDE_INT offset,
 }
 
 /* Create total_scalarization accesses for all scalar type fields in VAR and
-   for VAR a a whole.  VAR must be of a RECORD_TYPE conforming to
+   for VAR as a whole.  VAR must be of a RECORD_TYPE conforming to
    type_consists_of_records_p.   */
 
 static void
@@ -1208,7 +1205,7 @@ build_accesses_from_assign (gimple stmt)
     {
       struct assign_link *link;
 
-      link = (struct assign_link *) pool_alloc (link_pool);
+      link = assign_link_pool.allocate ();
       memset (link, 0, sizeof (struct assign_link));
 
       link->lacc = lacc;
@@ -1280,7 +1277,7 @@ scan_function (void)
 	  switch (gimple_code (stmt))
 	    {
 	    case GIMPLE_RETURN:
-	      t = gimple_return_retval (stmt);
+	      t = gimple_return_retval (as_a <greturn *> (stmt));
 	      if (t != NULL_TREE)
 		ret |= build_access_from_expr (t, stmt, false);
 	      if (final_bbs)
@@ -1325,21 +1322,24 @@ scan_function (void)
 	      break;
 
 	    case GIMPLE_ASM:
-	      walk_stmt_load_store_addr_ops (stmt, NULL, NULL, NULL,
-					     asm_visit_addr);
-	      if (final_bbs)
-		bitmap_set_bit (final_bbs, bb->index);
+	      {
+		gasm *asm_stmt = as_a <gasm *> (stmt);
+		walk_stmt_load_store_addr_ops (asm_stmt, NULL, NULL, NULL,
+					       asm_visit_addr);
+		if (final_bbs)
+		  bitmap_set_bit (final_bbs, bb->index);
 
-	      for (i = 0; i < gimple_asm_ninputs (stmt); i++)
-		{
-		  t = TREE_VALUE (gimple_asm_input_op (stmt, i));
-		  ret |= build_access_from_expr (t, stmt, false);
-		}
-	      for (i = 0; i < gimple_asm_noutputs (stmt); i++)
-		{
-		  t = TREE_VALUE (gimple_asm_output_op (stmt, i));
-		  ret |= build_access_from_expr (t, stmt, true);
-		}
+		for (i = 0; i < gimple_asm_ninputs (asm_stmt); i++)
+		  {
+		    t = TREE_VALUE (gimple_asm_input_op (asm_stmt, i));
+		    ret |= build_access_from_expr (t, asm_stmt, false);
+		  }
+		for (i = 0; i < gimple_asm_noutputs (asm_stmt); i++)
+		  {
+		    t = TREE_VALUE (gimple_asm_output_op (asm_stmt, i));
+		    ret |= build_access_from_expr (t, asm_stmt, true);
+		  }
+	      }
 	      break;
 
 	    default:
@@ -1528,11 +1528,11 @@ build_ref_for_offset (location_t loc, tree base, HOST_WIDE_INT offset,
      offset such as array[var_index].  */
   if (!base)
     {
-      gimple stmt;
+      gassign *stmt;
       tree tmp, addr;
 
       gcc_checking_assert (gsi);
-      tmp = make_ssa_name (build_pointer_type (TREE_TYPE (prev_base)), NULL);
+      tmp = make_ssa_name (build_pointer_type (TREE_TYPE (prev_base)));
       addr = build_fold_addr_expr (unshare_expr (prev_base));
       STRIP_USELESS_TYPE_CONVERSION (addr);
       stmt = gimple_build_assign (tmp, addr);
@@ -1563,7 +1563,7 @@ build_ref_for_offset (location_t loc, tree base, HOST_WIDE_INT offset,
   misalign = (misalign + offset) & (align - 1);
   if (misalign != 0)
     align = (misalign & -misalign);
-  if (align < TYPE_ALIGN (exp_type))
+  if (align != TYPE_ALIGN (exp_type))
     exp_type = build_aligned_type (exp_type, align);
 
   mem_ref = fold_build2_loc (loc, MEM_REF, exp_type, base, off);
@@ -1974,11 +1974,15 @@ create_access_replacement (struct access *access)
 
   if (access->grp_to_be_debug_replaced)
     {
-      repl = create_tmp_var_raw (access->type, NULL);
+      repl = create_tmp_var_raw (access->type);
       DECL_CONTEXT (repl) = current_function_decl;
     }
   else
-    repl = create_tmp_var (access->type, "SR");
+    /* Drop any special alignment on the type if it's not on the main
+       variant.  This avoids issues with weirdo ABIs like AAPCS.  */
+    repl = create_tmp_var (build_qualified_type
+			     (TYPE_MAIN_VARIANT (access->type),
+			      TYPE_QUALS (access->type)), "SR");
   if (TREE_CODE (access->type) == COMPLEX_TYPE
       || TREE_CODE (access->type) == VECTOR_TYPE)
     {
@@ -2355,13 +2359,12 @@ static struct access *
 create_artificial_child_access (struct access *parent, struct access *model,
 				HOST_WIDE_INT new_offset)
 {
-  struct access *access;
   struct access **child;
   tree expr = parent->base;
 
   gcc_assert (!model->grp_unscalarizable_region);
 
-  access = (struct access *) pool_alloc (access_pool);
+  struct access *access = access_pool.allocate ();
   memset (access, 0, sizeof (struct access));
   if (!build_user_friendly_ref_for_offset (&expr, TREE_TYPE (expr), new_offset,
 					   model->type))
@@ -2498,10 +2501,21 @@ analyze_all_variable_accesses (void)
   int res = 0;
   bitmap tmp = BITMAP_ALLOC (NULL);
   bitmap_iterator bi;
-  unsigned i, max_total_scalarization_size;
+  unsigned i;
+  bool optimize_speed_p = !optimize_function_for_size_p (cfun);
 
-  max_total_scalarization_size = UNITS_PER_WORD * BITS_PER_UNIT
-    * MOVE_RATIO (optimize_function_for_speed_p (cfun));
+  enum compiler_param param = optimize_speed_p
+			? PARAM_SRA_MAX_SCALARIZATION_SIZE_SPEED
+			: PARAM_SRA_MAX_SCALARIZATION_SIZE_SIZE;
+
+  /* If the user didn't set PARAM_SRA_MAX_SCALARIZATION_SIZE_<...>,
+     fall back to a target default.  */
+  unsigned HOST_WIDE_INT max_scalarization_size
+    = global_options_set.x_param_values[param]
+      ? PARAM_VALUE (param)
+      : get_move_ratio (optimize_speed_p) * UNITS_PER_WORD;
+
+  max_scalarization_size *= BITS_PER_UNIT;
 
   EXECUTE_IF_SET_IN_BITMAP (candidate_bitmap, 0, i, bi)
     if (bitmap_bit_p (should_scalarize_away_bitmap, i)
@@ -2513,7 +2527,7 @@ analyze_all_variable_accesses (void)
 	    && type_consists_of_records_p (TREE_TYPE (var)))
 	  {
 	    if (tree_to_uhwi (TYPE_SIZE (TREE_TYPE (var)))
-		<= max_total_scalarization_size)
+		<= max_scalarization_size)
 	      {
 		completely_scalarize_var (var);
 		if (dump_file && (dump_flags & TDF_DETAILS))
@@ -2610,7 +2624,7 @@ generate_subtree_copies (struct access *access, tree agg,
 	      || access->offset + access->size > start_offset))
 	{
 	  tree expr, repl = get_access_replacement (access);
-	  gimple stmt;
+	  gassign *stmt;
 
 	  expr = build_ref_for_model (loc, agg, access->offset - top_offset,
 				      access, gsi, insert_after);
@@ -2648,7 +2662,7 @@ generate_subtree_copies (struct access *access, tree agg,
 	       && (chunk_size == 0
 		   || access->offset + access->size > start_offset))
 	{
-	  gimple ds;
+	  gdebug *ds;
 	  tree drhs = build_debug_ref_for_model (loc, agg,
 						 access->offset - top_offset,
 						 access);
@@ -2684,7 +2698,7 @@ init_subtree_with_zero (struct access *access, gimple_stmt_iterator *gsi,
 
   if (access->grp_to_be_replaced)
     {
-      gimple stmt;
+      gassign *stmt;
 
       stmt = gimple_build_assign (get_access_replacement (access),
 				  build_zero_cst (access->type));
@@ -2697,9 +2711,10 @@ init_subtree_with_zero (struct access *access, gimple_stmt_iterator *gsi,
     }
   else if (access->grp_to_be_debug_replaced)
     {
-      gimple ds = gimple_build_debug_bind (get_access_replacement (access),
-					   build_zero_cst (access->type),
-					   gsi_stmt (*gsi));
+      gdebug *ds
+	= gimple_build_debug_bind (get_access_replacement (access),
+				   build_zero_cst (access->type),
+				   gsi_stmt (*gsi));
       if (insert_after)
 	gsi_insert_after (gsi, ds, GSI_NEW_STMT);
       else
@@ -2708,6 +2723,37 @@ init_subtree_with_zero (struct access *access, gimple_stmt_iterator *gsi,
 
   for (child = access->first_child; child; child = child->next_sibling)
     init_subtree_with_zero (child, gsi, insert_after, loc);
+}
+
+/* Clobber all scalar replacements in an access subtree.  ACCESS is the the
+   root of the subtree to be processed.  GSI is the statement iterator used
+   for inserting statements which are added after the current statement if
+   INSERT_AFTER is true or before it otherwise.  */
+
+static void
+clobber_subtree (struct access *access, gimple_stmt_iterator *gsi,
+		bool insert_after, location_t loc)
+
+{
+  struct access *child;
+
+  if (access->grp_to_be_replaced)
+    {
+      tree rep = get_access_replacement (access);
+      tree clobber = build_constructor (access->type, NULL);
+      TREE_THIS_VOLATILE (clobber) = 1;
+      gimple stmt = gimple_build_assign (rep, clobber);
+
+      if (insert_after)
+	gsi_insert_after (gsi, stmt, GSI_NEW_STMT);
+      else
+	gsi_insert_before (gsi, stmt, GSI_SAME_STMT);
+      update_stmt (stmt);
+      gimple_set_location (stmt, loc);
+    }
+
+  for (child = access->first_child; child; child = child->next_sibling)
+    clobber_subtree (child, gsi, insert_after, loc);
 }
 
 /* Search for an access representative for the given expression EXPR and
@@ -2793,7 +2839,7 @@ sra_modify_expr (tree *expr, gimple_stmt_iterator *gsi, bool write)
 
 	  if (write)
 	    {
-	      gimple stmt;
+	      gassign *stmt;
 
 	      if (access->grp_partial_lhs)
 		ref = force_gimple_operand_gsi (gsi, ref, true, NULL_TREE,
@@ -2804,7 +2850,7 @@ sra_modify_expr (tree *expr, gimple_stmt_iterator *gsi, bool write)
 	    }
 	  else
 	    {
-	      gimple stmt;
+	      gassign *stmt;
 
 	      if (access->grp_partial_lhs)
 		repl = force_gimple_operand_gsi (gsi, repl, true, NULL_TREE,
@@ -2820,9 +2866,9 @@ sra_modify_expr (tree *expr, gimple_stmt_iterator *gsi, bool write)
     }
   else if (write && access->grp_to_be_debug_replaced)
     {
-      gimple ds = gimple_build_debug_bind (get_access_replacement (access),
-					   NULL_TREE,
-					   gsi_stmt (*gsi));
+      gdebug *ds = gimple_build_debug_bind (get_access_replacement (access),
+					    NULL_TREE,
+					    gsi_stmt (*gsi));
       gsi_insert_after (gsi, ds, GSI_NEW_STMT);
     }
 
@@ -2922,7 +2968,7 @@ load_assign_lhs_subreplacements (struct access *lacc,
       if (lacc->grp_to_be_replaced)
 	{
 	  struct access *racc;
-	  gimple stmt;
+	  gassign *stmt;
 	  tree rhs;
 
 	  racc = find_access_in_subtree (sad->top_racc, offset, lacc->size);
@@ -2972,7 +3018,7 @@ load_assign_lhs_subreplacements (struct access *lacc,
 
 	  if (lacc && lacc->grp_to_be_debug_replaced)
 	    {
-	      gimple ds;
+	      gdebug *ds;
 	      tree drhs;
 	      struct access *racc = find_access_in_subtree (sad->top_racc,
 							    offset,
@@ -3022,17 +3068,16 @@ static enum assignment_mod_result
 sra_modify_constructor_assign (gimple stmt, gimple_stmt_iterator *gsi)
 {
   tree lhs = gimple_assign_lhs (stmt);
-  struct access *acc;
-  location_t loc;
-
-  acc = get_access_for_expr (lhs);
+  struct access *acc = get_access_for_expr (lhs);
   if (!acc)
     return SRA_AM_NONE;
+  location_t loc = gimple_location (stmt);
 
   if (gimple_clobber_p (stmt))
     {
-      /* Remove clobbers of fully scalarized variables, otherwise
-	 do nothing.  */
+      /* Clobber the replacement variable.  */
+      clobber_subtree (acc, gsi, !acc->grp_covered, loc);
+      /* Remove clobbers of fully scalarized variables, they are dead.  */
       if (acc->grp_covered)
 	{
 	  unlink_stmt_vdef (stmt);
@@ -3041,10 +3086,9 @@ sra_modify_constructor_assign (gimple stmt, gimple_stmt_iterator *gsi)
 	  return SRA_AM_REMOVED;
 	}
       else
-	return SRA_AM_NONE;
+	return SRA_AM_MODIFIED;
     }
 
-  loc = gimple_location (stmt);
   if (vec_safe_length (CONSTRUCTOR_ELTS (gimple_assign_rhs1 (stmt))) > 0)
     {
       /* I have never seen this code path trigger but if it can happen the
@@ -3214,7 +3258,7 @@ sra_modify_assign (gimple stmt, gimple_stmt_iterator *gsi)
 	    drhs = fold_build1_loc (loc, VIEW_CONVERT_EXPR,
 				    TREE_TYPE (dlhs), drhs);
 	}
-      gimple ds = gimple_build_debug_bind (dlhs, drhs, stmt);
+      gdebug *ds = gimple_build_debug_bind (dlhs, drhs, stmt);
       gsi_insert_before (gsi, ds, GSI_SAME_STMT);
     }
 
@@ -3384,7 +3428,7 @@ sra_modify_function_body (void)
 	  switch (gimple_code (stmt))
 	    {
 	    case GIMPLE_RETURN:
-	      t = gimple_return_retval_ptr (stmt);
+	      t = gimple_return_retval_ptr (as_a <greturn *> (stmt));
 	      if (*t != NULL_TREE)
 		modified |= sra_modify_expr (t, &gsi, false);
 	      break;
@@ -3411,16 +3455,19 @@ sra_modify_function_body (void)
 	      break;
 
 	    case GIMPLE_ASM:
-	      for (i = 0; i < gimple_asm_ninputs (stmt); i++)
-		{
-		  t = &TREE_VALUE (gimple_asm_input_op (stmt, i));
-		  modified |= sra_modify_expr (t, &gsi, false);
-		}
-	      for (i = 0; i < gimple_asm_noutputs (stmt); i++)
-		{
-		  t = &TREE_VALUE (gimple_asm_output_op (stmt, i));
-		  modified |= sra_modify_expr (t, &gsi, true);
-		}
+	      {
+		gasm *asm_stmt = as_a <gasm *> (stmt);
+		for (i = 0; i < gimple_asm_ninputs (asm_stmt); i++)
+		  {
+		    t = &TREE_VALUE (gimple_asm_input_op (asm_stmt, i));
+		    modified |= sra_modify_expr (t, &gsi, false);
+		  }
+		for (i = 0; i < gimple_asm_noutputs (asm_stmt); i++)
+		  {
+		    t = &TREE_VALUE (gimple_asm_output_op (asm_stmt, i));
+		    modified |= sra_modify_expr (t, &gsi, true);
+		  }
+	      }
 	      break;
 
 	    default:
@@ -3918,7 +3965,7 @@ dump_dereferences_table (FILE *f, const char *str, HOST_WIDE_INT *table)
 {
   basic_block bb;
 
-  fprintf (dump_file, str);
+  fprintf (dump_file, "%s", str);
   FOR_BB_BETWEEN (bb, ENTRY_BLOCK_PTR_FOR_FN (cfun),
 		  EXIT_BLOCK_PTR_FOR_FN (cfun), next_bb)
     {
@@ -4548,7 +4595,7 @@ replace_removed_params_ssa_names (gimple stmt,
   else if (is_gimple_call (stmt))
     gimple_call_set_lhs (stmt, name);
   else
-    gimple_phi_set_result (stmt, name);
+    gimple_phi_set_result (as_a <gphi *> (stmt), name);
 
   replace_uses_by (lhs, name);
   release_ssa_name (lhs);
@@ -4644,7 +4691,7 @@ ipa_sra_modify_function_body (ipa_parm_adjustment_vec adjustments)
 	  switch (gimple_code (stmt))
 	    {
 	    case GIMPLE_RETURN:
-	      t = gimple_return_retval_ptr (stmt);
+	      t = gimple_return_retval_ptr (as_a <greturn *> (stmt));
 	      if (*t != NULL_TREE)
 		modified |= ipa_modify_expr (t, true, adjustments);
 	      break;
@@ -4672,16 +4719,19 @@ ipa_sra_modify_function_body (ipa_parm_adjustment_vec adjustments)
 	      break;
 
 	    case GIMPLE_ASM:
-	      for (i = 0; i < gimple_asm_ninputs (stmt); i++)
-		{
-		  t = &TREE_VALUE (gimple_asm_input_op (stmt, i));
-		  modified |= ipa_modify_expr (t, true, adjustments);
-		}
-	      for (i = 0; i < gimple_asm_noutputs (stmt); i++)
-		{
-		  t = &TREE_VALUE (gimple_asm_output_op (stmt, i));
-		  modified |= ipa_modify_expr (t, false, adjustments);
-		}
+	      {
+		gasm *asm_stmt = as_a <gasm *> (stmt);
+		for (i = 0; i < gimple_asm_ninputs (asm_stmt); i++)
+		  {
+		    t = &TREE_VALUE (gimple_asm_input_op (asm_stmt, i));
+		    modified |= ipa_modify_expr (t, true, adjustments);
+		  }
+		for (i = 0; i < gimple_asm_noutputs (asm_stmt); i++)
+		  {
+		    t = &TREE_VALUE (gimple_asm_output_op (asm_stmt, i));
+		    modified |= ipa_modify_expr (t, false, adjustments);
+		  }
+	      }
 	      break;
 
 	    default:
@@ -4721,7 +4771,8 @@ sra_ipa_reset_debug_stmts (ipa_parm_adjustment_vec adjustments)
     {
       struct ipa_parm_adjustment *adj;
       imm_use_iterator ui;
-      gimple stmt, def_temp;
+      gimple stmt;
+      gdebug *def_temp;
       tree name, vexpr, copy = NULL_TREE;
       use_operand_p use_p;
 
@@ -4811,7 +4862,21 @@ some_callers_have_mismatched_arguments_p (struct cgraph_node *node,
 {
   struct cgraph_edge *cs;
   for (cs = node->callers; cs; cs = cs->next_caller)
-    if (!callsite_arguments_match_p (cs->call_stmt))
+    if (!cs->call_stmt || !callsite_arguments_match_p (cs->call_stmt))
+      return true;
+
+  return false;
+}
+
+/* Return false if all callers have vuse attached to a call statement.  */
+
+static bool
+some_callers_have_no_vuse_p (struct cgraph_node *node,
+			     void *data ATTRIBUTE_UNUSED)
+{
+  struct cgraph_edge *cs;
+  for (cs = node->callers; cs; cs = cs->next_caller)
+    if (!cs->call_stmt || !gimple_vuse (cs->call_stmt))
       return true;
 
   return false;
@@ -4860,8 +4925,8 @@ convert_callers (struct cgraph_node *node, tree old_decl,
 {
   basic_block this_block;
 
-  node->call_for_symbol_thunks_and_aliases (convert_callers_for_node,
-					  &adjustments, false);
+  node->call_for_symbol_and_aliases (convert_callers_for_node,
+				     &adjustments, false);
 
   if (!encountered_recursive_call)
     return;
@@ -4872,9 +4937,10 @@ convert_callers (struct cgraph_node *node, tree old_decl,
 
       for (gsi = gsi_start_bb (this_block); !gsi_end_p (gsi); gsi_next (&gsi))
         {
-	  gimple stmt = gsi_stmt (gsi);
+	  gcall *stmt;
 	  tree call_fndecl;
-	  if (gimple_code (stmt) != GIMPLE_CALL)
+	  stmt = dyn_cast <gcall *> (gsi_stmt (gsi));
+	  if (!stmt)
 	    continue;
 	  call_fndecl = gimple_call_fndecl (stmt);
 	  if (call_fndecl == old_decl)
@@ -4921,13 +4987,60 @@ modify_function (struct cgraph_node *node, ipa_parm_adjustment_vec adjustments)
   return cfg_changed;
 }
 
-/* If NODE has a caller, return true.  */
+/* Means of communication between ipa_sra_check_caller and
+   ipa_sra_preliminary_function_checks.  */
+
+struct ipa_sra_check_caller_data
+{
+  bool has_callers;
+  bool bad_arg_alignment;
+  bool has_thunk;
+};
+
+/* If NODE has a caller, mark that fact in DATA which is pointer to
+   ipa_sra_check_caller_data.  Also check all aggregate arguments in all known
+   calls if they are unit aligned and if not, set the appropriate flag in DATA
+   too. */
 
 static bool
-has_caller_p (struct cgraph_node *node, void *data ATTRIBUTE_UNUSED)
+ipa_sra_check_caller (struct cgraph_node *node, void *data)
 {
-  if (node->callers)
-    return true;
+  if (!node->callers)
+    return false;
+
+  struct ipa_sra_check_caller_data *iscc;
+  iscc = (struct ipa_sra_check_caller_data *) data;
+  iscc->has_callers = true;
+
+  for (cgraph_edge *cs = node->callers; cs; cs = cs->next_caller)
+    {
+      if (cs->caller->thunk.thunk_p)
+	{
+	  iscc->has_thunk = true;
+	  return true;
+	}
+      gimple call_stmt = cs->call_stmt;
+      unsigned count = gimple_call_num_args (call_stmt);
+      for (unsigned i = 0; i < count; i++)
+	{
+	  tree arg = gimple_call_arg (call_stmt, i);
+	  if (is_gimple_reg (arg))
+	      continue;
+
+	  tree offset;
+	  HOST_WIDE_INT bitsize, bitpos;
+	  machine_mode mode;
+	  int unsignedp, volatilep = 0;
+	  get_inner_reference (arg, &bitsize, &bitpos, &offset, &mode,
+			       &unsignedp, &volatilep, false);
+	  if (bitpos % BITS_PER_UNIT)
+	    {
+	      iscc->bad_arg_alignment = true;
+	      return true;
+	    }
+	}
+    }
+
   return false;
 }
 
@@ -4974,19 +5087,11 @@ ipa_sra_preliminary_function_checks (struct cgraph_node *node)
       return false;
     }
 
-  if ((DECL_COMDAT (node->decl) || DECL_EXTERNAL (node->decl))
-      && inline_summary (node)->size >= MAX_INLINE_INSNS_AUTO)
+  if ((DECL_ONE_ONLY (node->decl) || DECL_EXTERNAL (node->decl))
+      && inline_summaries->get (node)->size >= MAX_INLINE_INSNS_AUTO)
     {
       if (dump_file)
 	fprintf (dump_file, "Function too big to be made truly local.\n");
-      return false;
-    }
-
-  if (!node->call_for_symbol_thunks_and_aliases (has_caller_p, NULL, true))
-    {
-      if (dump_file)
-	fprintf (dump_file,
-		 "Function has no callers in this compilation unit.\n");
       return false;
     }
 
@@ -5005,6 +5110,33 @@ ipa_sra_preliminary_function_checks (struct cgraph_node *node)
       if (dump_file)
 	fprintf (dump_file, "Always inline function will be inlined "
 		 "anyway. \n");
+      return false;
+    }
+
+  struct ipa_sra_check_caller_data iscc;
+  memset (&iscc, 0, sizeof(iscc));
+  node->call_for_symbol_and_aliases (ipa_sra_check_caller, &iscc, true);
+  if (!iscc.has_callers)
+    {
+      if (dump_file)
+	fprintf (dump_file,
+		 "Function has no callers in this compilation unit.\n");
+      return false;
+    }
+
+  if (iscc.bad_arg_alignment)
+    {
+      if (dump_file)
+	fprintf (dump_file,
+		 "A function call has an argument with non-unit alignment.\n");
+      return false;
+    }
+
+  if (iscc.has_thunk)
+    {
+      if (dump_file)
+	fprintf (dump_file,
+		 "A has thunk.\n");
       return false;
     }
 
@@ -5033,12 +5165,21 @@ ipa_early_sra (void)
       goto simple_out;
     }
 
-  if (node->call_for_symbol_thunks_and_aliases
+  if (node->call_for_symbol_and_aliases
        (some_callers_have_mismatched_arguments_p, NULL, true))
     {
       if (dump_file)
 	fprintf (dump_file, "There are callers with insufficient number of "
 		 "arguments or arguments with type mismatches.\n");
+      goto simple_out;
+    }
+
+  if (node->call_for_symbol_and_aliases
+       (some_callers_have_no_vuse_p, NULL, true))
+    {
+      if (dump_file)
+	fprintf (dump_file, "There are callers with no VUSE attached "
+		 "to a call stmt.\n");
       goto simple_out;
     }
 

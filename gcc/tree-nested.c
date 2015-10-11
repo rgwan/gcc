@@ -1,5 +1,5 @@
 /* Nested function decomposition for GIMPLE.
-   Copyright (C) 2004-2014 Free Software Foundation, Inc.
+   Copyright (C) 2004-2015 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -20,36 +20,37 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
 #include "tree.h"
+#include "gimple.h"
+#include "rtl.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stringpool.h"
 #include "stor-layout.h"
 #include "tm_p.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
 #include "tree-dump.h"
 #include "tree-inline.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimplify.h"
 #include "gimple-iterator.h"
 #include "gimple-walk.h"
 #include "tree-iterator.h"
-#include "bitmap.h"
 #include "cgraph.h"
 #include "tree-cfg.h"
+#include "flags.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"	/* FIXME: For STACK_SAVEAREA_MODE and SAVE_NONLOCAL.  */
 #include "langhooks.h"
 #include "gimple-low.h"
+#include "gomp-constants.h"
 
 
 /* The object of this pass is to lower the representation of a set of nested
@@ -414,7 +415,7 @@ get_chain_field (struct nesting_info *info)
 
 static tree
 init_tmp_var_with_call (struct nesting_info *info, gimple_stmt_iterator *gsi,
-		        gimple call)
+		        gcall *call)
 {
   tree t;
 
@@ -619,7 +620,7 @@ walk_function (walk_stmt_fn callback_stmt, walk_tree_fn callback_op,
 /* Invoke CALLBACK on a GIMPLE_OMP_FOR's init, cond, incr and pre-body.  */
 
 static void
-walk_gimple_omp_for (gimple for_stmt,
+walk_gimple_omp_for (gomp_for *for_stmt,
     		     walk_stmt_fn callback_stmt, walk_tree_fn callback_op,
     		     struct nesting_info *info)
 {
@@ -766,10 +767,12 @@ get_static_chain (struct nesting_info *info, tree target_context,
   if (info->context == target_context)
     {
       x = build_addr (info->frame_decl, target_context);
+      info->static_chain_added |= 1;
     }
   else
     {
       x = get_chain_decl (info);
+      info->static_chain_added |= 2;
 
       for (i = info->outer; i->context != target_context; i = i->outer)
 	{
@@ -801,10 +804,12 @@ get_frame_field (struct nesting_info *info, tree target_context,
       /* Make sure frame_decl gets created.  */
       (void) get_frame_type (info);
       x = info->frame_decl;
+      info->static_chain_added |= 1;
     }
   else
     {
       x = get_chain_decl (info);
+      info->static_chain_added |= 2;
 
       for (i = info->outer; i->context != target_context; i = i->outer)
 	{
@@ -827,7 +832,7 @@ static void note_nonlocal_vla_type (struct nesting_info *info, tree type);
 /* A subroutine of convert_nonlocal_reference_op.  Create a local variable
    in the nested function with DECL_VALUE_EXPR set to reference the true
    variable in the parent function.  This is used both for debug info
-   and in OpenMP lowering.  */
+   and in OMP lowering.  */
 
 static tree
 get_nonlocal_debug_decl (struct nesting_info *info, tree decl)
@@ -850,10 +855,12 @@ get_nonlocal_debug_decl (struct nesting_info *info, tree decl)
       (void) get_frame_type (info);
       x = info->frame_decl;
       i = info;
+      info->static_chain_added |= 1;
     }
   else
     {
       x = get_chain_decl (info);
+      info->static_chain_added |= 2;
       for (i = info->outer; i->context != target_context; i = i->outer)
 	{
 	  field = get_chain_field (i);
@@ -1351,7 +1358,8 @@ convert_nonlocal_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
     case GIMPLE_OMP_FOR:
       save_suppress = info->suppress_expansion;
       convert_nonlocal_omp_clauses (gimple_omp_for_clauses_ptr (stmt), wi);
-      walk_gimple_omp_for (stmt, convert_nonlocal_reference_stmt,
+      walk_gimple_omp_for (as_a <gomp_for *> (stmt),
+			   convert_nonlocal_reference_stmt,
 	  		   convert_nonlocal_reference_op, info);
       walk_body (convert_nonlocal_reference_stmt,
 	  	 convert_nonlocal_reference_op, info, gimple_omp_body_ptr (stmt));
@@ -1375,7 +1383,7 @@ convert_nonlocal_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_OMP_TARGET:
-      if (gimple_omp_target_kind (stmt) != GF_OMP_TARGET_KIND_REGION)
+      if (!is_gimple_omp_offloaded (stmt))
 	{
 	  save_suppress = info->suppress_expansion;
 	  convert_nonlocal_omp_clauses (gimple_omp_target_clauses_ptr (stmt),
@@ -1394,10 +1402,10 @@ convert_nonlocal_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 	  decl = get_chain_decl (info);
 	  c = build_omp_clause (gimple_location (stmt), OMP_CLAUSE_MAP);
 	  OMP_CLAUSE_DECL (c) = decl;
-	  OMP_CLAUSE_MAP_KIND (c) = OMP_CLAUSE_MAP_TO;
+	  OMP_CLAUSE_SET_MAP_KIND (c, GOMP_MAP_TO);
 	  OMP_CLAUSE_SIZE (c) = DECL_SIZE_UNIT (decl);
 	  OMP_CLAUSE_CHAIN (c) = gimple_omp_target_clauses (stmt);
-	  gimple_omp_target_set_clauses (stmt, c);
+	  gimple_omp_target_set_clauses (as_a <gomp_target *> (stmt), c);
 	}
 
       save_local_var_chain = info->new_local_var_chain;
@@ -1431,10 +1439,12 @@ convert_nonlocal_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_BIND:
-      if (!optimize && gimple_bind_block (stmt))
-	note_nonlocal_block_vlas (info, gimple_bind_block (stmt));
+      {
+      gbind *bind_stmt = as_a <gbind *> (stmt);
+      if (!optimize && gimple_bind_block (bind_stmt))
+	note_nonlocal_block_vlas (info, gimple_bind_block (bind_stmt));
 
-      for (tree var = gimple_bind_vars (stmt); var; var = DECL_CHAIN (var))
+      for (tree var = gimple_bind_vars (bind_stmt); var; var = DECL_CHAIN (var))
 	if (TREE_CODE (var) == NAMELIST_DECL)
 	  {
 	    /* Adjust decls mentioned in NAMELIST_DECL.  */
@@ -1455,7 +1465,7 @@ convert_nonlocal_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 
       *handled_ops_p = false;
       return NULL_TREE;
-
+      }
     case GIMPLE_COND:
       wi->val_only = true;
       wi->is_lhs = false;
@@ -1477,7 +1487,7 @@ convert_nonlocal_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 
 /* A subroutine of convert_local_reference.  Create a local variable
    in the parent function with DECL_VALUE_EXPR set to reference the
-   field in FRAME.  This is used both for debug info and in OpenMP
+   field in FRAME.  This is used both for debug info and in OMP
    lowering.  */
 
 static tree
@@ -1917,7 +1927,8 @@ convert_local_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
     case GIMPLE_OMP_FOR:
       save_suppress = info->suppress_expansion;
       convert_local_omp_clauses (gimple_omp_for_clauses_ptr (stmt), wi);
-      walk_gimple_omp_for (stmt, convert_local_reference_stmt,
+      walk_gimple_omp_for (as_a <gomp_for *> (stmt),
+			   convert_local_reference_stmt,
 			   convert_local_reference_op, info);
       walk_body (convert_local_reference_stmt, convert_local_reference_op,
 		 info, gimple_omp_body_ptr (stmt));
@@ -1941,7 +1952,7 @@ convert_local_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_OMP_TARGET:
-      if (gimple_omp_target_kind (stmt) != GF_OMP_TARGET_KIND_REGION)
+      if (!is_gimple_omp_offloaded (stmt))
 	{
 	  save_suppress = info->suppress_expansion;
 	  convert_local_omp_clauses (gimple_omp_target_clauses_ptr (stmt), wi);
@@ -1957,10 +1968,10 @@ convert_local_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 	  (void) get_frame_type (info);
 	  c = build_omp_clause (gimple_location (stmt), OMP_CLAUSE_MAP);
 	  OMP_CLAUSE_DECL (c) = info->frame_decl;
-	  OMP_CLAUSE_MAP_KIND (c) = OMP_CLAUSE_MAP_TOFROM;
+	  OMP_CLAUSE_SET_MAP_KIND (c, GOMP_MAP_TOFROM);
 	  OMP_CLAUSE_SIZE (c) = DECL_SIZE_UNIT (info->frame_decl);
 	  OMP_CLAUSE_CHAIN (c) = gimple_omp_target_clauses (stmt);
-	  gimple_omp_target_set_clauses (stmt, c);
+	  gimple_omp_target_set_clauses (as_a <gomp_target *> (stmt), c);
 	}
 
       save_local_var_chain = info->new_local_var_chain;
@@ -2013,7 +2024,9 @@ convert_local_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       return NULL_TREE;
 
     case GIMPLE_BIND:
-      for (tree var = gimple_bind_vars (stmt); var; var = DECL_CHAIN (var))
+      for (tree var = gimple_bind_vars (as_a <gbind *> (stmt));
+	   var;
+	   var = DECL_CHAIN (var))
 	if (TREE_CODE (var) == NAMELIST_DECL)
 	  {
 	    /* Adjust decls mentioned in NAMELIST_DECL.  */
@@ -2065,7 +2078,7 @@ convert_nl_goto_reference (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 {
   struct nesting_info *const info = (struct nesting_info *) wi->info, *i;
   tree label, new_label, target_context, x, field;
-  gimple call;
+  gcall *call;
   gimple stmt = gsi_stmt (*gsi);
 
   if (gimple_code (stmt) != GIMPLE_GOTO)
@@ -2136,9 +2149,9 @@ convert_nl_goto_receiver (gimple_stmt_iterator *gsi, bool *handled_ops_p,
   struct nesting_info *const info = (struct nesting_info *) wi->info;
   tree label, new_label;
   gimple_stmt_iterator tmp_gsi;
-  gimple stmt = gsi_stmt (*gsi);
+  glabel *stmt = dyn_cast <glabel *> (gsi_stmt (*gsi));
 
-  if (gimple_code (stmt) != GIMPLE_LABEL)
+  if (!stmt)
     {
       *handled_ops_p = false;
       return NULL_TREE;
@@ -2182,7 +2195,7 @@ convert_tramp_reference_op (tree *tp, int *walk_subtrees, void *data)
   struct walk_stmt_info *wi = (struct walk_stmt_info *) data;
   struct nesting_info *const info = (struct nesting_info *) wi->info, *i;
   tree t = *tp, decl, target_context, x, builtin;
-  gimple call;
+  gcall *call;
 
   *walk_subtrees = 0;
   switch (TREE_CODE (t))
@@ -2272,7 +2285,7 @@ convert_tramp_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       }
 
     case GIMPLE_OMP_TARGET:
-      if (gimple_omp_target_kind (stmt) != GF_OMP_TARGET_KIND_REGION)
+      if (!is_gimple_omp_offloaded (stmt))
 	{
 	  *handled_ops_p = false;
 	  return NULL_TREE;
@@ -2281,17 +2294,55 @@ convert_tramp_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
     case GIMPLE_OMP_PARALLEL:
     case GIMPLE_OMP_TASK:
       {
-	tree save_local_var_chain;
+	tree save_local_var_chain = info->new_local_var_chain;
         walk_gimple_op (stmt, convert_tramp_reference_op, wi);
-	save_local_var_chain = info->new_local_var_chain;
 	info->new_local_var_chain = NULL;
+	char save_static_chain_added = info->static_chain_added;
+	info->static_chain_added = 0;
         walk_body (convert_tramp_reference_stmt, convert_tramp_reference_op,
 		   info, gimple_omp_body_ptr (stmt));
 	if (info->new_local_var_chain)
 	  declare_vars (info->new_local_var_chain,
 			gimple_seq_first_stmt (gimple_omp_body (stmt)),
 			false);
+	for (int i = 0; i < 2; i++)
+	  {
+	    tree c, decl;
+	    if ((info->static_chain_added & (1 << i)) == 0)
+	      continue;
+	    decl = i ? get_chain_decl (info) : info->frame_decl;
+	    /* Don't add CHAIN.* or FRAME.* twice.  */
+	    for (c = gimple_omp_taskreg_clauses (stmt);
+		 c;
+		 c = OMP_CLAUSE_CHAIN (c))
+	      if ((OMP_CLAUSE_CODE (c) == OMP_CLAUSE_FIRSTPRIVATE
+		   || OMP_CLAUSE_CODE (c) == OMP_CLAUSE_SHARED)
+		  && OMP_CLAUSE_DECL (c) == decl)
+		break;
+	      if (c == NULL && gimple_code (stmt) != GIMPLE_OMP_TARGET)
+		{
+		  c = build_omp_clause (gimple_location (stmt),
+					i ? OMP_CLAUSE_FIRSTPRIVATE
+					  : OMP_CLAUSE_SHARED);
+		  OMP_CLAUSE_DECL (c) = decl;
+		  OMP_CLAUSE_CHAIN (c) = gimple_omp_taskreg_clauses (stmt);
+		  gimple_omp_taskreg_set_clauses (stmt, c);
+		}
+	      else if (c == NULL)
+		{
+		  c = build_omp_clause (gimple_location (stmt),
+					OMP_CLAUSE_MAP);
+		  OMP_CLAUSE_DECL (c) = decl;
+		  OMP_CLAUSE_SET_MAP_KIND (c,
+					   i ? GOMP_MAP_TO : GOMP_MAP_TOFROM);
+		  OMP_CLAUSE_SIZE (c) = DECL_SIZE_UNIT (decl);
+		  OMP_CLAUSE_CHAIN (c) = gimple_omp_target_clauses (stmt);
+		  gimple_omp_target_set_clauses (as_a <gomp_target *> (stmt),
+						 c);
+		}
+	  }
 	info->new_local_var_chain = save_local_var_chain;
+	info->static_chain_added |= save_static_chain_added;
       }
       break;
 
@@ -2331,8 +2382,9 @@ convert_gimple_call (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       target_context = decl_function_context (decl);
       if (target_context && DECL_STATIC_CHAIN (decl))
 	{
-	  gimple_call_set_chain (stmt, get_static_chain (info, target_context,
-							 &wi->gsi));
+	  gimple_call_set_chain (as_a <gcall *> (stmt),
+				 get_static_chain (info, target_context,
+						   &wi->gsi));
 	  info->static_chain_added |= (1 << (info->context != target_context));
 	}
       break;
@@ -2370,7 +2422,7 @@ convert_gimple_call (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_OMP_TARGET:
-      if (gimple_omp_target_kind (stmt) != GF_OMP_TARGET_KIND_REGION)
+      if (!is_gimple_omp_offloaded (stmt))
 	{
 	  walk_body (convert_gimple_call, NULL, info, gimple_omp_body_ptr (stmt));
 	  break;
@@ -2395,11 +2447,11 @@ convert_gimple_call (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 	    {
 	      c = build_omp_clause (gimple_location (stmt), OMP_CLAUSE_MAP);
 	      OMP_CLAUSE_DECL (c) = decl;
-	      OMP_CLAUSE_MAP_KIND (c)
-		= i ? OMP_CLAUSE_MAP_TO : OMP_CLAUSE_MAP_TOFROM;
+	      OMP_CLAUSE_SET_MAP_KIND (c, i ? GOMP_MAP_TO : GOMP_MAP_TOFROM);
 	      OMP_CLAUSE_SIZE (c) = DECL_SIZE_UNIT (decl);
 	      OMP_CLAUSE_CHAIN (c) = gimple_omp_target_clauses (stmt);
-	      gimple_omp_target_set_clauses (stmt, c);
+	      gimple_omp_target_set_clauses (as_a <gomp_target *> (stmt),
+					     c);
 	    }
 	}
       info->static_chain_added |= save_static_chain_added;
@@ -2779,9 +2831,9 @@ finalize_nesting_tree_1 (struct nesting_info *root)
   /* If we created initialization statements, insert them.  */
   if (stmt_list)
     {
-      gimple bind;
+      gbind *bind;
       annotate_all_with_location (stmt_list, DECL_SOURCE_LOCATION (context));
-      bind = gimple_seq_first_stmt (gimple_body (context));
+      bind = gimple_seq_first_stmt_as_a_bind (gimple_body (context));
       gimple_seq_add_seq (&stmt_list, gimple_bind_body (bind));
       gimple_bind_set_body (bind, stmt_list);
     }
@@ -2810,7 +2862,7 @@ finalize_nesting_tree_1 (struct nesting_info *root)
   if (root->debug_var_chain)
     {
       tree debug_var;
-      gimple scope;
+      gbind *scope;
 
       remap_vla_decls (DECL_INITIAL (root->context), root);
 
@@ -2865,7 +2917,7 @@ finalize_nesting_tree_1 (struct nesting_info *root)
 	  delete id.cb.decl_map;
 	}
 
-      scope = gimple_seq_first_stmt (gimple_body (root->context));
+      scope = gimple_seq_first_stmt_as_a_bind (gimple_body (root->context));
       if (gimple_bind_block (scope))
 	declare_vars (root->debug_var_chain, scope, true);
       else

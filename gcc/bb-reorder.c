@@ -1,5 +1,5 @@
 /* Basic block reordering routines for the GNU compiler.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -81,46 +81,44 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
 #include "rtl.h"
+#include "df.h"
+#include "alias.h"
 #include "regs.h"
 #include "flags.h"
 #include "output.h"
-#include "fibheap.h"
 #include "target.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
 #include "tm_p.h"
-#include "obstack.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
+#include "optabs.h"
 #include "params.h"
 #include "diagnostic-core.h"
 #include "toplev.h" /* user_defined_section_attribute */
 #include "tree-pass.h"
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "bb-reorder.h"
 #include "cgraph.h"
 #include "except.h"
+#include "fibonacci_heap.h"
 
 /* The number of rounds.  In most cases there will only be 4 rounds, but
    when partitioning hot and cold basic blocks into separate sections of
    the object file there will be an extra round.  */
 #define N_ROUNDS 5
-
-/* Stubs in case we don't have a return insn.
-   We have to check at run time too, not only compile time.  */
-
-#ifndef HAVE_return
-#define HAVE_return 0
-#define gen_return() NULL_RTX
-#endif
-
 
 struct target_bb_reorder default_target_bb_reorder;
 #if SWITCHABLE_TARGET
@@ -140,8 +138,11 @@ static const int exec_threshold[N_ROUNDS] = {500, 200, 50, 0, 0};
    block the edge destination is not duplicated while connecting traces.  */
 #define DUPLICATION_THRESHOLD 100
 
+typedef fibonacci_heap <long, basic_block_def> bb_heap_t;
+typedef fibonacci_node <long, basic_block_def> bb_heap_node_t;
+
 /* Structure to hold needed information for each basic block.  */
-typedef struct bbro_basic_block_data_def
+struct bbro_basic_block_data
 {
   /* Which trace is the bb start of (-1 means it is not a start of any).  */
   int start_of_trace;
@@ -156,11 +157,11 @@ typedef struct bbro_basic_block_data_def
   int visited;
 
   /* Which heap is BB in (if any)?  */
-  fibheap_t heap;
+  bb_heap_t *heap;
 
   /* Which heap node is BB in (if any)?  */
-  fibnode_t node;
-} bbro_basic_block_data;
+  bb_heap_node_t *node;
+};
 
 /* The current size of the following dynamic array.  */
 static int array_size;
@@ -197,9 +198,9 @@ static void find_traces (int *, struct trace *);
 static basic_block rotate_loop (edge, struct trace *, int);
 static void mark_bb_visited (basic_block, int);
 static void find_traces_1_round (int, int, gcov_type, struct trace *, int *,
-				 int, fibheap_t *, int);
+				 int, bb_heap_t **, int);
 static basic_block copy_bb (basic_block, edge, basic_block, int);
-static fibheapkey_t bb_to_key (basic_block);
+static long bb_to_key (basic_block);
 static bool better_edge_p (const_basic_block, const_edge, int, int, int, int,
 			   const_edge);
 static bool connect_better_edge_p (const_edge, bool, int, const_edge,
@@ -225,7 +226,7 @@ mark_bb_visited (basic_block bb, int trace)
   bbd[bb->index].visited = trace;
   if (bbd[bb->index].heap)
     {
-      fibheap_delete_node (bbd[bb->index].heap, bbd[bb->index].node);
+      bbd[bb->index].heap->delete_node (bbd[bb->index].node);
       bbd[bb->index].heap = NULL;
       bbd[bb->index].node = NULL;
     }
@@ -270,7 +271,7 @@ find_traces (int *n_traces, struct trace *traces)
   int number_of_rounds;
   edge e;
   edge_iterator ei;
-  fibheap_t heap;
+  bb_heap_t *heap = new bb_heap_t (LONG_MIN);
 
   /* Add one extra round of trace collection when partitioning hot/cold
      basic blocks into separate sections.  The last round is for all the
@@ -279,14 +280,12 @@ find_traces (int *n_traces, struct trace *traces)
   number_of_rounds = N_ROUNDS - 1;
 
   /* Insert entry points of function into heap.  */
-  heap = fibheap_new ();
   max_entry_frequency = 0;
   max_entry_count = 0;
   FOR_EACH_EDGE (e, ei, ENTRY_BLOCK_PTR_FOR_FN (cfun)->succs)
     {
       bbd[e->dest->index].heap = heap;
-      bbd[e->dest->index].node = fibheap_insert (heap, bb_to_key (e->dest),
-						    e->dest);
+      bbd[e->dest->index].node = heap->insert (bb_to_key (e->dest), e->dest);
       if (e->dest->frequency > max_entry_frequency)
 	max_entry_frequency = e->dest->frequency;
       if (e->dest->count > max_entry_count)
@@ -311,7 +310,7 @@ find_traces (int *n_traces, struct trace *traces)
 			   count_threshold, traces, n_traces, i, &heap,
 			   number_of_rounds);
     }
-  fibheap_delete (heap);
+  delete heap;
 
   if (dump_file)
     {
@@ -457,22 +456,22 @@ rotate_loop (edge back_edge, struct trace *trace, int trace_n)
 static void
 find_traces_1_round (int branch_th, int exec_th, gcov_type count_th,
 		     struct trace *traces, int *n_traces, int round,
-		     fibheap_t *heap, int number_of_rounds)
+		     bb_heap_t **heap, int number_of_rounds)
 {
   /* Heap for discarded basic blocks which are possible starting points for
      the next round.  */
-  fibheap_t new_heap = fibheap_new ();
+  bb_heap_t *new_heap = new bb_heap_t (LONG_MIN);
   bool for_size = optimize_function_for_size_p (cfun);
 
-  while (!fibheap_empty (*heap))
+  while (!(*heap)->empty ())
     {
       basic_block bb;
       struct trace *trace;
       edge best_edge, e;
-      fibheapkey_t key;
+      long key;
       edge_iterator ei;
 
-      bb = (basic_block) fibheap_extract_min (*heap);
+      bb = (*heap)->extract_min ();
       bbd[bb->index].heap = NULL;
       bbd[bb->index].node = NULL;
 
@@ -490,7 +489,7 @@ find_traces_1_round (int branch_th, int exec_th, gcov_type count_th,
 	{
 	  int key = bb_to_key (bb);
 	  bbd[bb->index].heap = new_heap;
-	  bbd[bb->index].node = fibheap_insert (new_heap, key, bb);
+	  bbd[bb->index].node = new_heap->insert (key, bb);
 
 	  if (dump_file)
 	    fprintf (dump_file,
@@ -620,23 +619,23 @@ find_traces_1_round (int branch_th, int exec_th, gcov_type count_th,
 	      if (bbd[e->dest->index].heap)
 		{
 		  /* E->DEST is already in some heap.  */
-		  if (key != bbd[e->dest->index].node->key)
+		  if (key != bbd[e->dest->index].node->get_key ())
 		    {
 		      if (dump_file)
 			{
 			  fprintf (dump_file,
 				   "Changing key for bb %d from %ld to %ld.\n",
 				   e->dest->index,
-				   (long) bbd[e->dest->index].node->key,
+				   (long) bbd[e->dest->index].node->get_key (),
 				   key);
 			}
-		      fibheap_replace_key (bbd[e->dest->index].heap,
-					   bbd[e->dest->index].node, key);
+		      bbd[e->dest->index].heap->replace_key
+		        (bbd[e->dest->index].node, key);
 		    }
 		}
 	      else
 		{
-		  fibheap_t which_heap = *heap;
+		  bb_heap_t *which_heap = *heap;
 
 		  prob = e->probability;
 		  freq = EDGE_FREQUENCY (e);
@@ -658,8 +657,7 @@ find_traces_1_round (int branch_th, int exec_th, gcov_type count_th,
 		    }
 
 		  bbd[e->dest->index].heap = which_heap;
-		  bbd[e->dest->index].node = fibheap_insert (which_heap,
-								key, e->dest);
+		  bbd[e->dest->index].node = which_heap->insert (key, e->dest);
 
 		  if (dump_file)
 		    {
@@ -790,24 +788,23 @@ find_traces_1_round (int branch_th, int exec_th, gcov_type count_th,
 	  if (bbd[e->dest->index].heap)
 	    {
 	      key = bb_to_key (e->dest);
-	      if (key != bbd[e->dest->index].node->key)
+	      if (key != bbd[e->dest->index].node->get_key ())
 		{
 		  if (dump_file)
 		    {
 		      fprintf (dump_file,
 			       "Changing key for bb %d from %ld to %ld.\n",
 			       e->dest->index,
-			       (long) bbd[e->dest->index].node->key, key);
+			       (long) bbd[e->dest->index].node->get_key (), key);
 		    }
-		  fibheap_replace_key (bbd[e->dest->index].heap,
-				       bbd[e->dest->index].node,
-				       key);
+		  bbd[e->dest->index].heap->replace_key
+		    (bbd[e->dest->index].node, key);
 		}
 	    }
 	}
     }
 
-  fibheap_delete (*heap);
+  delete (*heap);
 
   /* "Return" the new heap.  */
   *heap = new_heap;
@@ -872,7 +869,7 @@ copy_bb (basic_block old_bb, edge e, basic_block bb, int trace)
 
 /* Compute and return the key (for the heap) of the basic block BB.  */
 
-static fibheapkey_t
+static long
 bb_to_key (basic_block bb)
 {
   edge e;
@@ -1377,16 +1374,14 @@ copy_bb_p (const_basic_block bb, int code_may_grow)
 int
 get_uncond_jump_length (void)
 {
-  rtx_insn *label, *jump;
   int length;
 
-  label = emit_label_before (gen_label_rtx (), get_insns ());
-  jump = emit_jump_insn (gen_jump (label));
-
+  start_sequence ();
+  rtx_code_label *label = emit_label (gen_label_rtx ());
+  rtx_insn *jump = emit_jump_insn (targetm.gen_jump (label));
   length = get_attr_min_length (jump);
+  end_sequence ();
 
-  delete_insn (jump);
-  delete_insn (label);
   return length;
 }
 
@@ -1399,8 +1394,7 @@ fix_up_crossing_landing_pad (eh_landing_pad old_lp, basic_block old_bb)
 {
   eh_landing_pad new_lp;
   basic_block new_bb, last_bb, post_bb;
-  rtx_insn *new_label, *jump;
-  rtx post_label;
+  rtx_insn *jump;
   unsigned new_partition;
   edge_iterator ei;
   edge e;
@@ -1412,14 +1406,14 @@ fix_up_crossing_landing_pad (eh_landing_pad old_lp, basic_block old_bb)
   LABEL_PRESERVE_P (new_lp->landing_pad) = 1;
 
   /* Put appropriate instructions in new bb.  */
-  new_label = emit_label (new_lp->landing_pad);
+  rtx_code_label *new_label = emit_label (new_lp->landing_pad);
 
   expand_dw2_landing_pad_for_region (old_lp->region);
 
   post_bb = BLOCK_FOR_INSN (old_lp->landing_pad);
   post_bb = single_succ (post_bb);
-  post_label = block_label (post_bb);
-  jump = emit_jump_insn (gen_jump (post_label));
+  rtx_code_label *post_label = block_label (post_bb);
+  jump = emit_jump_insn (targetm.gen_jump (post_label));
   JUMP_LABEL (jump) = post_label;
 
   /* Create new basic block to be dest for lp.  */
@@ -1570,7 +1564,7 @@ find_rarely_executed_basic_blocks_and_crossing_edges (void)
   edge e;
   edge_iterator ei;
   unsigned int cold_bb_count = 0;
-  vec<basic_block> bbs_in_hot_partition = vNULL;
+  auto_vec<basic_block> bbs_in_hot_partition;
 
   /* Mark which partition (hot/cold) each basic block belongs in.  */
   FOR_EACH_BB_FN (bb, cfun)
@@ -1718,9 +1712,11 @@ set_edge_can_fallthru_flag (void)
 	continue;
       if (!any_condjump_p (BB_END (bb)))
 	continue;
-      if (!invert_jump (BB_END (bb), JUMP_LABEL (BB_END (bb)), 0))
+
+      rtx_jump_insn *bb_end_jump = as_a <rtx_jump_insn *> (BB_END (bb));
+      if (!invert_jump (bb_end_jump, JUMP_LABEL (bb_end_jump), 0))
 	continue;
-      invert_jump (BB_END (bb), JUMP_LABEL (BB_END (bb)), 0);
+      invert_jump (bb_end_jump, JUMP_LABEL (bb_end_jump), 0);
       EDGE_SUCC (bb, 0)->flags |= EDGE_CAN_FALLTHRU;
       EDGE_SUCC (bb, 1)->flags |= EDGE_CAN_FALLTHRU;
     }
@@ -1739,14 +1735,13 @@ add_labels_and_missing_jumps (vec<edge> crossing_edges)
     {
       basic_block src = e->src;
       basic_block dest = e->dest;
-      rtx label;
-      rtx_insn *new_jump;
+      rtx_jump_insn *new_jump;
 
       if (dest == EXIT_BLOCK_PTR_FOR_FN (cfun))
 	continue;
 
       /* Make sure dest has a label.  */
-      label = block_label (dest);
+      rtx_code_label *label = block_label (dest);
 
       /* Nothing to do for non-fallthru edges.  */
       if (src == ENTRY_BLOCK_PTR_FOR_FN (cfun))
@@ -1764,7 +1759,7 @@ add_labels_and_missing_jumps (vec<edge> crossing_edges)
       /* Make sure there's only one successor.  */
       gcc_assert (single_succ_p (src));
 
-      new_jump = emit_jump_insn_after (gen_jump (label), BB_END (src));
+      new_jump = emit_jump_insn_after (targetm.gen_jump (label), BB_END (src));
       BB_END (src) = new_jump;
       JUMP_LABEL (new_jump) = label;
       LABEL_NUSES (label) += 1;
@@ -1794,11 +1789,10 @@ fix_up_fall_thru_edges (void)
   edge succ2;
   edge fall_thru;
   edge cond_jump = NULL;
-  edge e;
   bool cond_jump_crosses;
   int invert_worked;
   rtx_insn *old_jump;
-  rtx fall_thru_label;
+  rtx_code_label *fall_thru_label;
 
   FOR_EACH_BB_FN (cur_bb, cfun)
     {
@@ -1875,17 +1869,21 @@ fix_up_fall_thru_edges (void)
 
 		      fall_thru_label = block_label (fall_thru->dest);
 
-		      if (old_jump && JUMP_P (old_jump) && fall_thru_label)
-			invert_worked = invert_jump (old_jump,
-						     fall_thru_label,0);
+		      if (old_jump && fall_thru_label)
+			{
+			  rtx_jump_insn *old_jump_insn =
+				dyn_cast <rtx_jump_insn *> (old_jump);
+			  if (old_jump_insn)
+			    invert_worked = invert_jump (old_jump_insn,
+							 fall_thru_label, 0);
+			}
+
 		      if (invert_worked)
 			{
 			  fall_thru->flags &= ~EDGE_FALLTHRU;
 			  cond_jump->flags |= EDGE_FALLTHRU;
 			  update_br_prob_note (cur_bb);
-			  e = fall_thru;
-			  fall_thru = cond_jump;
-			  cond_jump = e;
+			  std::swap (fall_thru, cond_jump);
 			  cond_jump->flags |= EDGE_CROSSING;
 			  fall_thru->flags &= ~EDGE_CROSSING;
 			}
@@ -1994,10 +1992,9 @@ fix_crossing_conditional_branches (void)
   edge succ2;
   edge crossing_edge;
   edge new_edge;
-  rtx_insn *old_jump;
   rtx set_src;
   rtx old_label = NULL_RTX;
-  rtx new_label;
+  rtx_code_label *new_label;
 
   FOR_EACH_BB_FN (cur_bb, cfun)
     {
@@ -2022,7 +2019,7 @@ fix_crossing_conditional_branches (void)
 
       if (crossing_edge)
 	{
-	  old_jump = BB_END (cur_bb);
+	  rtx_insn *old_jump = BB_END (cur_bb);
 
 	  /* Check to make sure the jump instruction is a
 	     conditional jump.  */
@@ -2045,6 +2042,9 @@ fix_crossing_conditional_branches (void)
 
 	  if (set_src && (GET_CODE (set_src) == IF_THEN_ELSE))
 	    {
+	      rtx_jump_insn *old_jump_insn =
+			as_a <rtx_jump_insn *> (old_jump);
+
 	      if (GET_CODE (XEXP (set_src, 1)) == PC)
 		old_label = XEXP (set_src, 2);
 	      else if (GET_CODE (XEXP (set_src, 2)) == PC)
@@ -2061,7 +2061,8 @@ fix_crossing_conditional_branches (void)
 	      else
 		{
 		  basic_block last_bb;
-		  rtx_insn *new_jump;
+		  rtx_code_label *old_jump_target;
+		  rtx_jump_insn *new_jump;
 
 		  /* Create new basic block to be dest for
 		     conditional jump.  */
@@ -2072,9 +2073,10 @@ fix_crossing_conditional_branches (void)
 		  emit_label (new_label);
 
 		  gcc_assert (GET_CODE (old_label) == LABEL_REF);
-		  old_label = JUMP_LABEL (old_jump);
-		  new_jump = emit_jump_insn (gen_jump (old_label));
-		  JUMP_LABEL (new_jump) = old_label;
+		  old_jump_target = old_jump_insn->jump_target ();
+		  new_jump = as_a <rtx_jump_insn *>
+		    (emit_jump_insn (targetm.gen_jump (old_jump_target)));
+		  new_jump->set_jump_target (old_jump_target);
 
 		  last_bb = EXIT_BLOCK_PTR_FOR_FN (cfun)->prev_bb;
 		  new_bb = create_basic_block (new_label, new_jump, last_bb);
@@ -2090,7 +2092,7 @@ fix_crossing_conditional_branches (void)
 
 	      /* Make old jump branch to new bb.  */
 
-	      redirect_jump (old_jump, new_label, 0);
+	      redirect_jump (old_jump_insn, new_label, 0);
 
 	      /* Remove crossing_edge as predecessor of 'dest'.  */
 

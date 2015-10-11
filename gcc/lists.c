@@ -1,5 +1,5 @@
 /* List management for the GCC expander.
-   Copyright (C) 1987-2014 Free Software Foundation, Inc.
+   Copyright (C) 1987-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -23,7 +23,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "tm.h"
 #include "diagnostic-core.h"
 #include "rtl.h"
-#include "ggc.h"
 
 static void free_list (rtx *, rtx *);
 
@@ -139,7 +138,7 @@ alloc_EXPR_LIST (int kind, rtx val, rtx next)
       PUT_REG_NOTE_KIND (r, kind);
     }
   else
-    r = gen_rtx_EXPR_LIST ((enum machine_mode) kind, val, next);
+    r = gen_rtx_EXPR_LIST ((machine_mode) kind, val, next);
 
   return r;
 }

@@ -1,5 +1,5 @@
 /* SSA operands management for trees.
-   Copyright (C) 2003-2014 Free Software Foundation, Inc.
+   Copyright (C) 2003-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,31 +20,18 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
 #include "tree.h"
+#include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stmt.h"
 #include "print-tree.h"
 #include "flags.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
 #include "gimple-pretty-print.h"
-#include "bitmap.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
-#include "gimple-ssa.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-inline.h"
 #include "timevar.h"
 #include "dumpfile.h"
@@ -408,9 +395,10 @@ finalize_ssa_uses (struct function *fn, gimple stmt)
   /* If there is anything in the old list, free it.  */
   if (old_ops)
     {
-      for (ptr = old_ops; ptr; ptr = ptr->next)
+      for (ptr = old_ops; ptr->next; ptr = ptr->next)
 	delink_imm_use (USE_OP_PTR (ptr));
-      old_ops->next = gimple_ssa_operands (fn)->free_uses;
+      delink_imm_use (USE_OP_PTR (ptr));
+      ptr->next = gimple_ssa_operands (fn)->free_uses;
       gimple_ssa_operands (fn)->free_uses = old_ops;
     }
 
@@ -640,7 +628,7 @@ get_tmr_operands (struct function *fn, gimple stmt, tree expr, int flags)
    escape, add them to the VDEF/VUSE lists for it.  */
 
 static void
-maybe_add_call_vops (struct function *fn, gimple stmt)
+maybe_add_call_vops (struct function *fn, gcall *stmt)
 {
   int call_flags = gimple_call_flags (stmt);
 
@@ -661,7 +649,7 @@ maybe_add_call_vops (struct function *fn, gimple stmt)
 /* Scan operands in the ASM_EXPR stmt referred to in INFO.  */
 
 static void
-get_asm_stmt_operands (struct function *fn, gimple stmt)
+get_asm_stmt_operands (struct function *fn, gasm *stmt)
 {
   size_t i, noutputs;
   const char **oconstraints;
@@ -915,7 +903,7 @@ parse_ssa_operands (struct function *fn, gimple stmt)
   switch (code)
     {
     case GIMPLE_ASM:
-      get_asm_stmt_operands (fn, stmt);
+      get_asm_stmt_operands (fn, as_a <gasm *> (stmt));
       break;
 
     case GIMPLE_TRANSACTION:
@@ -936,7 +924,7 @@ parse_ssa_operands (struct function *fn, gimple stmt)
 
     case GIMPLE_CALL:
       /* Add call-clobbered operands, if needed.  */
-      maybe_add_call_vops (fn, stmt);
+      maybe_add_call_vops (fn, as_a <gcall *> (stmt));
       /* FALLTHRU */
 
     case GIMPLE_ASSIGN:
@@ -1316,22 +1304,6 @@ unlink_stmt_vdef (gimple stmt)
     SSA_NAME_OCCURS_IN_ABNORMAL_PHI (vuse) = 1;
 }
 
-
-/* Return true if the var whose chain of uses starts at PTR has no
-   nondebug uses.  */
-bool
-has_zero_uses_1 (const ssa_use_operand_t *head)
-{
-  const ssa_use_operand_t *ptr;
-
-  for (ptr = head->next; ptr != head; ptr = ptr->next)
-    if (!is_gimple_debug (USE_STMT (ptr)))
-      return false;
-
-  return true;
-}
-
-
 /* Return true if the var whose chain of uses starts at PTR has a
    single nondebug use.  Set USE_P and STMT to that single nondebug
    use, if so, or to NULL otherwise.  */
@@ -1342,7 +1314,7 @@ single_imm_use_1 (const ssa_use_operand_t *head,
   ssa_use_operand_t *ptr, *single_use = 0;
 
   for (ptr = head->next; ptr != head; ptr = ptr->next)
-    if (!is_gimple_debug (USE_STMT (ptr)))
+    if (USE_STMT(ptr) && !is_gimple_debug (USE_STMT (ptr)))
       {
 	if (single_use)
 	  {
@@ -1360,3 +1332,4 @@ single_imm_use_1 (const ssa_use_operand_t *head,
 
   return single_use;
 }
+

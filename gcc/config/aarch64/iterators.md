@@ -1,5 +1,5 @@
 ;; Machine description for AArch64 architecture.
-;; Copyright (C) 2009-2014 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2015 Free Software Foundation, Inc.
 ;; Contributed by ARM Ltd.
 ;;
 ;; This file is part of GCC.
@@ -32,17 +32,14 @@
 ;; Iterator for all integer modes (up to 64-bit)
 (define_mode_iterator ALLI [QI HI SI DI])
 
-;; Iterator scalar modes (up to 64-bit)
-(define_mode_iterator SDQ_I [QI HI SI DI])
-
 ;; Iterator for all integer modes that can be extended (up to 64-bit)
 (define_mode_iterator ALLX [QI HI SI])
 
 ;; Iterator for General Purpose Floating-point registers (32- and 64-bit modes)
 (define_mode_iterator GPF [SF DF])
 
-;; Integer vector modes.
-(define_mode_iterator VDQ [V8QI V16QI V4HI V8HI V2SI V4SI V2DI])
+;; Iterator for General Purpose Float registers, inc __fp16.
+(define_mode_iterator GPF_F16 [HF SF DF])
 
 ;; Integer vector modes.
 (define_mode_iterator VDQ_I [V8QI V16QI V4HI V8HI V2SI V4SI V2DI])
@@ -71,16 +68,6 @@
 
 ;; Quad vector with only 2 element modes.
 (define_mode_iterator VQ_2E [V2DI V2DF])
-
-;; All vector modes, except double.
-(define_mode_iterator VQ_S [V8QI V16QI V4HI V8HI V2SI V4SI])
-
-;; Vector and scalar, 64 & 128-bit container: all vector integer mode;
-;; 8, 16, 32-bit scalar integer modes
-(define_mode_iterator VSDQ_I_BHSI [V8QI V16QI V4HI V8HI V2SI V4SI V2DI QI HI SI])
-
-;; Vector modes for moves.
-(define_mode_iterator VDQM [V8QI V16QI V4HI V8HI V2SI V4SI])
 
 ;; This mode iterator allows :P to be used for patterns that operate on
 ;; addresses in different modes.  In LP64, only DI will match, while in
@@ -132,9 +119,6 @@
 ;; All quad integer narrow-able modes.
 (define_mode_iterator VQN [V8HI V4SI V2DI])
 
-;; All double integer widen-able modes.
-(define_mode_iterator VDW [V8QI V4HI V2SI])
-
 ;; Vector and scalar 128-bit container: narrowable 16, 32, 64-bit integer modes
 (define_mode_iterator VSQN_HSDI [V8HI V4SI V2DI HI SI DI])
 
@@ -144,14 +128,11 @@
 ;; Double vector modes for combines.
 (define_mode_iterator VDC [V8QI V4HI V2SI V2SF DI DF])
 
-;; Double vector modes for combines.
-(define_mode_iterator VDIC [V8QI V4HI V2SI])
-
-;; Double vector modes inc V1DF
-(define_mode_iterator VD1 [V8QI V4HI V2SI V2SF V1DF])
-
 ;; Vector modes except double int.
 (define_mode_iterator VDQIF [V8QI V16QI V4HI V8HI V2SI V4SI V2SF V4SF V2DF])
+
+;; Vector modes for S type.
+(define_mode_iterator VDQ_SI [V2SI V4SI])
 
 ;; Vector modes for Q and H types.
 (define_mode_iterator VDQQH [V8QI V16QI V4HI V8HI])
@@ -161,9 +142,6 @@
 
 ;; Vector modes for H, S and D types.
 (define_mode_iterator VDQHSD [V4HI V8HI V2SI V4SI V2DI])
-
-;; Vector modes for Q, H and S types.
-(define_mode_iterator VDQQHS [V8QI V16QI V4HI V8HI V2SI V4SI])
 
 ;; Vector and scalar integer modes for H and S
 (define_mode_iterator VSDQ_HSI [V4HI V8HI V2SI V4SI HI SI])
@@ -182,6 +160,9 @@
 
 ;; All byte modes.
 (define_mode_iterator VB [V8QI V16QI])
+
+;; 2 and 4 lane SI modes.
+(define_mode_iterator VS [V2SI V4SI])
 
 (define_mode_iterator TX [TI TF])
 
@@ -206,6 +187,7 @@
  [
     UNSPEC_ASHIFT_SIGNED	; Used in aarch-simd.md.
     UNSPEC_ASHIFT_UNSIGNED	; Used in aarch64-simd.md.
+    UNSPEC_ABS		; Used in aarch64-simd.md.
     UNSPEC_FMAX		; Used in aarch64-simd.md.
     UNSPEC_FMAXNMV	; Used in aarch64-simd.md.
     UNSPEC_FMAXV	; Used in aarch64-simd.md.
@@ -213,8 +195,7 @@
     UNSPEC_FMINNMV	; Used in aarch64-simd.md.
     UNSPEC_FMINV	; Used in aarch64-simd.md.
     UNSPEC_FADDV	; Used in aarch64-simd.md.
-    UNSPEC_SADDV	; Used in aarch64-simd.md.
-    UNSPEC_UADDV	; Used in aarch64-simd.md.
+    UNSPEC_ADDV		; Used in aarch64-simd.md.
     UNSPEC_SMAXV	; Used in aarch64-simd.md.
     UNSPEC_SMINV	; Used in aarch64-simd.md.
     UNSPEC_UMAXV	; Used in aarch64-simd.md.
@@ -299,6 +280,8 @@
     UNSPEC_SHA256SU1    ; Used in aarch64-simd.md.
     UNSPEC_PMULL        ; Used in aarch64-simd.md.
     UNSPEC_PMULL2       ; Used in aarch64-simd.md.
+    UNSPEC_REV_REGLIST  ; Used in aarch64-simd.md.
+    UNSPEC_VEC_SHR      ; Used in aarch64-simd.md.
 ])
 
 ;; -------------------------------------------------------------------
@@ -407,7 +390,8 @@
 			  (V2SI "8b") (V4SI  "16b")
 			  (V2DI "16b") (V2SF  "8b")
 			  (V4SF "16b") (V2DF  "16b")
-			  (DI   "8b")  (DF    "8b")])
+			  (DI   "8b")  (DF    "8b")
+			  (SI   "8b")])
 
 ;; Define element mode for each vector mode.
 (define_mode_attr VEL [(V8QI "QI") (V16QI "QI")
@@ -485,7 +469,7 @@
 
 )
 
-;; Widened mode register suffixes for VDW/VQW.
+;; Widened mode register suffixes for VD_BHSI/VQW.
 (define_mode_attr Vwtype [(V8QI "8h") (V4HI "4s")
 			  (V2SI "2d") (V16QI "8h") 
 			  (V8HI "4s") (V4SI "2d")])
@@ -556,24 +540,15 @@
 
 (define_mode_attr VRL2 [(V8QI "V32QI") (V4HI "V16HI")
 			(V2SI "V8SI")  (V2SF "V8SF")
-			(DI   "V4DI")  (DF   "V4DF")
-			(V16QI "V32QI") (V8HI "V16HI")
-			(V4SI "V8SI")  (V4SF "V8SF")
-			(V2DI "V4DI")  (V2DF "V4DF")])
+			(DI   "V4DI")  (DF   "V4DF")])
 
 (define_mode_attr VRL3 [(V8QI "V48QI") (V4HI "V24HI")
 			(V2SI "V12SI")  (V2SF "V12SF")
-			(DI   "V6DI")  (DF   "V6DF")
-			(V16QI "V48QI") (V8HI "V24HI")
-			(V4SI "V12SI")  (V4SF "V12SF")
-			(V2DI "V6DI")  (V2DF "V6DF")])
+			(DI   "V6DI")  (DF   "V6DF")])
 
 (define_mode_attr VRL4 [(V8QI "V64QI") (V4HI "V32HI")
 			(V2SI "V16SI")  (V2SF "V16SF")
-			(DI   "V8DI")  (DF   "V8DF")
-			(V16QI "V64QI") (V8HI "V32HI")
-			(V4SI "V16SI")  (V4SF "V16SF")
-			(V2DI "V8DI")  (V2DF "V8DF")])
+			(DI   "V8DI")  (DF   "V8DF")])
 
 (define_mode_attr VSTRUCT_DREG [(OI "TI") (CI "EI") (XI "OI")])
 
@@ -668,6 +643,15 @@
 		      (V2DI  "p") (V2DF  "p")
 		      (V2SF "p") (V4SF  "v")])
 
+(define_mode_attr vsi2qi [(V2SI "v8qi") (V4SI "v16qi")])
+(define_mode_attr VSI2QI [(V2SI "V8QI") (V4SI "V16QI")])
+
+(define_mode_attr insn_count [(OI "8") (CI "12") (XI "16")])
+
+;; -fpic small model GOT reloc modifers: gotpage_lo15/lo14 for ILP64/32.
+;; No need of iterator for -fPIC as it use got_lo12 for both modes.
+(define_mode_attr got_modifier [(SI "gotpage_lo14") (DI "gotpage_lo15")])
+
 ;; -------------------------------------------------------------------
 ;; Code Iterators
 ;; -------------------------------------------------------------------
@@ -680,6 +664,9 @@
 
 ;; Code iterator for logical operations
 (define_code_iterator LOGICAL [and ior xor])
+
+;; Code iterator for logical operations whose :nlogical works on SIMD registers.
+(define_code_iterator NLOGICAL [and ior])
 
 ;; Code iterator for sign/zero extension
 (define_code_iterator ANY_EXTEND [sign_extend zero_extend])
@@ -824,6 +811,9 @@
 		      (smax "s") (umax "u")
 		      (smin "s") (umin "u")])
 
+;; Emit conditional branch instructions.
+(define_code_attr bcond [(eq "beq") (ne "bne") (lt "bne") (ge "beq")])
+
 ;; Emit cbz/cbnz depending on comparison type.
 (define_code_attr cbz [(eq "cbz") (ne "cbnz") (lt "cbnz") (ge "cbz")])
 
@@ -850,6 +840,16 @@
    (plus "aarch64_plus_operand")
    (minus "aarch64_plus_operand")])
 
+;; Constants acceptable for atomic operations.
+;; This definition must appear in this file before the iterators it refers to.
+(define_code_attr const_atomic
+ [(plus "IJ") (minus "IJ")
+  (xor "<lconst_atomic>") (ior "<lconst_atomic>")
+  (and "<lconst_atomic>")])
+
+;; Attribute to describe constants acceptable in atomic logical operations
+(define_mode_attr lconst_atomic [(QI "K") (HI "K") (SI "K") (DI "L")])
+
 ;; -------------------------------------------------------------------
 ;; Int Iterators.
 ;; -------------------------------------------------------------------
@@ -858,8 +858,6 @@
 
 (define_int_iterator FMAXMINV [UNSPEC_FMAXV UNSPEC_FMINV
 			       UNSPEC_FMAXNMV UNSPEC_FMINNMV])
-
-(define_int_iterator SUADDV [UNSPEC_SADDV UNSPEC_UADDV])
 
 (define_int_iterator HADDSUB [UNSPEC_SHADD UNSPEC_UHADD
 			      UNSPEC_SRHADD UNSPEC_URHADD
@@ -965,7 +963,6 @@
 		      (UNSPEC_SUBHN2 "") (UNSPEC_RSUBHN2 "r")
 		      (UNSPEC_SQXTN "s") (UNSPEC_UQXTN "u")
 		      (UNSPEC_USQADD "us") (UNSPEC_SUQADD "su")
-		      (UNSPEC_SADDV "s") (UNSPEC_UADDV "u")
 		      (UNSPEC_SSLI  "s") (UNSPEC_USLI  "u")
 		      (UNSPEC_SSRI  "s") (UNSPEC_USRI  "u")
 		      (UNSPEC_USRA  "u") (UNSPEC_SSRA  "s")

@@ -1,5 +1,5 @@
 /* Header file for any pass which requires SSA routines.
-   Copyright (C) 2013-2014 Free Software Foundation, Inc.
+   Copyright (C) 2013-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,12 +21,11 @@ along with GCC; see the file COPYING3.  If not see
 #define GCC_TREE_SSA_H
 
 /* Mapping for redirected edges.  */
-struct _edge_var_map {
+struct edge_var_map {
   tree result;			/* PHI result.  */
   tree def;			/* PHI arg definition.  */
   source_location locus;        /* PHI arg location.  */
 };
-typedef struct _edge_var_map edge_var_map;
 
 /* A vector of var maps.  */
 typedef vec<edge_var_map, va_heap, vl_embed> edge_var_map_vector;
@@ -51,7 +50,7 @@ extern void delete_tree_ssa (void);
 extern bool tree_ssa_useless_type_conversion (tree);
 extern tree tree_ssa_strip_useless_type_conversions (tree);
 
-extern bool ssa_undefined_value_p (tree);
+extern bool ssa_undefined_value_p (tree, bool = true);
 extern void execute_update_addresses_taken (void);
 
 /* Given an edge_var_map V, return the PHI arg definition.  */

@@ -3,7 +3,7 @@
    building RTL.  These routines are used both during actual parsing
    and during the instantiation of template functions.
 
-   Copyright (C) 1998-2014 Free Software Foundation, Inc.
+   Copyright (C) 1998-2015 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -24,13 +24,17 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "alias.h"
 #include "tree.h"
+#include "options.h"
 #include "stringpool.h"
+#include "tm.h"
+#include "hard-reg-set.h"
+#include "function.h"
 #include "cgraph.h"
 #include "tree-iterator.h"
 #include "cp-tree.h"
 #include "toplev.h"
-#include "vec.h"
 
 /* Constructor for a lambda expression.  */
 
@@ -472,9 +476,10 @@ add_capture (tree lambda, tree id, tree orig_init, bool by_reference_p,
 					  NULL_TREE, array_type_nelts (type));
       type = vla_capture_type (type);
     }
-  else if (variably_modified_type_p (type, NULL_TREE))
+  else if (!dependent_type_p (type)
+	   && variably_modified_type_p (type, NULL_TREE))
     {
-      error ("capture of variable-size type %qT that is not a C++14 array "
+      error ("capture of variable-size type %qT that is not an N3639 array "
 	     "of runtime bound", type);
       if (TREE_CODE (type) == ARRAY_TYPE
 	  && variably_modified_type_p (TREE_TYPE (type), NULL_TREE))
@@ -488,7 +493,7 @@ add_capture (tree lambda, tree id, tree orig_init, bool by_reference_p,
       if (by_reference_p)
 	{
 	  type = build_reference_type (type);
-	  if (!real_lvalue_p (initializer))
+	  if (!dependent_type_p (type) && !real_lvalue_p (initializer))
 	    error ("cannot capture %qE by reference", initializer);
 	}
       else
@@ -628,7 +633,7 @@ add_default_capture (tree lambda_stack, tree id, tree initializer)
 
 /* Return the capture pertaining to a use of 'this' in LAMBDA, in the
    form of an INDIRECT_REF, possibly adding it through default
-   capturing, if ADD_CAPTURE_P is false.  */
+   capturing, if ADD_CAPTURE_P is true.  */
 
 tree
 lambda_expr_this_capture (tree lambda, bool add_capture_p)
@@ -637,17 +642,9 @@ lambda_expr_this_capture (tree lambda, bool add_capture_p)
 
   tree this_capture = LAMBDA_EXPR_THIS_CAPTURE (lambda);
 
-  /* In unevaluated context this isn't an odr-use, so just return the
-     nearest 'this'.  */
+  /* In unevaluated context this isn't an odr-use, so don't capture.  */
   if (cp_unevaluated_operand)
-    {
-      /* In an NSDMI the fake 'this' pointer that we're using for
-	 parsing is in scope_chain.  */
-      if (LAMBDA_EXPR_EXTRA_SCOPE (lambda)
-	  && TREE_CODE (LAMBDA_EXPR_EXTRA_SCOPE (lambda)) == FIELD_DECL)
-	return scope_chain->x_current_class_ptr;
-      return lookup_name (this_identifier);
-    }
+    add_capture_p = false;
 
   /* Try to default capture 'this' if we can.  */
   if (!this_capture
@@ -722,11 +719,17 @@ lambda_expr_this_capture (tree lambda, bool add_capture_p)
         }
     }
 
-  if (!this_capture)
+  if (cp_unevaluated_operand)
+    result = this_capture;
+  else if (!this_capture)
     {
       if (add_capture_p)
-	error ("%<this%> was not captured for this lambda function");
-      result = error_mark_node;
+	{
+	  error ("%<this%> was not captured for this lambda function");
+	  result = error_mark_node;
+	}
+      else
+	result = NULL_TREE;
     }
   else
     {
@@ -769,7 +772,7 @@ maybe_resolve_dummy (tree object, bool add_capture_p)
       /* In a lambda, need to go through 'this' capture.  */
       tree lam = CLASSTYPE_LAMBDA_EXPR (current_class_type);
       tree cap = lambda_expr_this_capture (lam, add_capture_p);
-      if (cap != error_mark_node)
+      if (cap && cap != error_mark_node)
 	object = build_x_indirect_ref (EXPR_LOCATION (object), cap,
 				       RO_NULL, tf_warning_or_error);
     }
@@ -814,6 +817,30 @@ nonlambda_method_basetype (void)
   return TYPE_METHOD_BASETYPE (TREE_TYPE (fn));
 }
 
+/* Like current_scope, but looking through lambdas.  */
+
+tree
+current_nonlambda_scope (void)
+{
+  tree scope = current_scope ();
+  for (;;)
+    {
+      if (TREE_CODE (scope) == FUNCTION_DECL
+	  && LAMBDA_FUNCTION_P (scope))
+	{
+	  scope = CP_TYPE_CONTEXT (DECL_CONTEXT (scope));
+	  continue;
+	}
+      else if (LAMBDA_TYPE_P (scope))
+	{
+	  scope = CP_TYPE_CONTEXT (scope);
+	  continue;
+	}
+      break;
+    }
+  return scope;
+}
+
 /* Helper function for maybe_add_lambda_conv_op; build a CALL_EXPR with
    indicated FN and NARGS, but do not initialize the return type or any of the
    argument slots.  */
@@ -836,7 +863,7 @@ prepare_op_call (tree fn, int nargs)
 void
 maybe_add_lambda_conv_op (tree type)
 {
-  bool nested = (current_function_decl != NULL_TREE);
+  bool nested = (cfun != NULL);
   bool nested_def = decl_function_context (TYPE_MAIN_DECL (type));
   tree callop = lambda_function (type);
 

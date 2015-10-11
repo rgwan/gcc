@@ -1,5 +1,5 @@
 ;; GCC machine description for CRIS cpu cores.
-;; Copyright (C) 1998-2014 Free Software Foundation, Inc.
+;; Copyright (C) 1998-2015 Free Software Foundation, Inc.
 ;; Contributed by Axis Communications.
 
 ;; This file is part of GCC.
@@ -2754,8 +2754,7 @@
 	  reg1 = reg0;
 	}
 
-      emit_insn (gen_rtx_SET (SImode, reg0,
-			  gen_rtx_AND (SImode, reg1, operands[2])));
+      emit_insn (gen_rtx_SET (reg0, gen_rtx_AND (SImode, reg1, operands[2])));
 
       /* Make sure we get the right *final* destination.  */
       if (! REG_P (operands[0]))
@@ -2856,8 +2855,7 @@
 	  reg1 = reg0;
 	}
 
-      emit_insn (gen_rtx_SET (HImode, reg0,
-			  gen_rtx_AND (HImode, reg1, operands[2])));
+      emit_insn (gen_rtx_SET (reg0, gen_rtx_AND (HImode, reg1, operands[2])));
 
       /* Make sure we get the right destination.  */
       if (! REG_P (operands[0]))
@@ -3520,14 +3518,12 @@
 
 (define_expand "prologue"
   [(const_int 0)]
-  "TARGET_PROLOGUE_EPILOGUE"
+  ""
   "cris_expand_prologue (); DONE;")
 
-;; Note that the (return) from the expander itself is always the last
-;; insn in the epilogue.
 (define_expand "epilogue"
   [(const_int 0)]
-  "TARGET_PROLOGUE_EPILOGUE"
+  ""
   "cris_expand_epilogue (); DONE;")
 
 ;; Conditional branches.
@@ -4997,8 +4993,8 @@
   [(set (match_dup 0) (match_dup 4))
    (set (match_dup 5) (match_dup 6))]
 {
-  enum machine_mode zmode = INTVAL (operands[3]) <= 255 ? QImode : HImode;
-  enum machine_mode amode
+  machine_mode zmode = INTVAL (operands[3]) <= 255 ? QImode : HImode;
+  machine_mode amode
     = satisfies_constraint_O (operands[3]) ? SImode : zmode;
   rtx op1
     = (REG_S_P (operands[1])
@@ -5035,7 +5031,7 @@
   [(set (match_dup 0) (match_dup 3))
    (set (match_dup 0) (and:SI (match_dup 0) (match_dup 4)))]
 {
-  enum machine_mode zmode = INTVAL (operands[2]) <= 255 ? QImode : HImode;
+  machine_mode zmode = INTVAL (operands[2]) <= 255 ? QImode : HImode;
   rtx op1
     = (REG_S_P (operands[2])
        ? gen_rtx_REG (zmode, REGNO (operands[2]))

@@ -1,6 +1,6 @@
 // <experimental/tuple> -*- C++ -*-
 
-// Copyright (C) 2014 Free Software Foundation, Inc.
+// Copyright (C) 2014-2015 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -36,6 +36,7 @@
 #else
 
 #include <tuple>
+#include <functional>
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -44,14 +45,21 @@ namespace experimental
 inline namespace fundamentals_v1
 {
 _GLIBCXX_BEGIN_NAMESPACE_VERSION
+
   // See C++14 §20.4.2.5, tuple helper classes
   template <typename _Tp>
     constexpr size_t tuple_size_v = tuple_size<_Tp>::value;
 
+#define __cpp_lib_experimental_tuple 201402
+
   template <typename _Fn, typename _Tuple, std::size_t... _Idx>
     constexpr decltype(auto)
     __apply_impl(_Fn&& f, _Tuple&& t, std::index_sequence<_Idx...>)
-    { return std::forward<_Fn>(f)(get<_Idx>(forward<_Tuple>(t))...); }
+    {
+      using _Wrap = _Maybe_wrap_member_pointer<decay_t<_Fn>>;
+      return _Wrap::__do_wrap(std::forward<_Fn>(f))(
+	  get<_Idx>(forward<_Tuple>(t))...);
+    }
 
   template <typename _Fn, typename _Tuple>
     constexpr decltype(auto)

@@ -1,5 +1,5 @@
 /* Integrated Register Allocator (IRA) entry point.
-   Copyright (C) 2006-2014 Free Software Foundation, Inc.
+   Copyright (C) 2006-2015 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -366,33 +366,36 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "regs.h"
+#include "backend.h"
 #include "tree.h"
 #include "rtl.h"
+#include "df.h"
+#include "regs.h"
+#include "alias.h"
 #include "tm_p.h"
 #include "target.h"
 #include "flags.h"
-#include "obstack.h"
-#include "bitmap.h"
-#include "hard-reg-set.h"
-#include "basic-block.h"
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
-#include "recog.h"
 #include "params.h"
 #include "tree-pass.h"
 #include "output.h"
 #include "except.h"
 #include "reload.h"
 #include "diagnostic-core.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
-#include "ggc.h"
+#include "cfgloop.h"
+#include "ira.h"
+#include "alloc-pool.h"
 #include "ira-int.h"
 #include "lra.h"
 #include "dce.h"
@@ -425,9 +428,9 @@ struct ira_spilled_reg_stack_slot *ira_spilled_reg_stack_slots;
    the allocnos assigned to memory, cost of loads, stores and register
    move insns generated for pseudo-register live range splitting (see
    ira-emit.c).  */
-int ira_overall_cost, overall_cost_before;
-int ira_reg_cost, ira_mem_cost;
-int ira_load_cost, ira_store_cost, ira_shuffle_cost;
+int64_t ira_overall_cost, overall_cost_before;
+int64_t ira_reg_cost, ira_mem_cost;
+int64_t ira_load_cost, ira_store_cost, ira_shuffle_cost;
 int ira_move_loops_num, ira_additional_jumps_num;
 
 /* All registers that can be eliminated.  */
@@ -587,11 +590,11 @@ setup_class_subset_and_memory_move_costs (void)
 	  {
 	    ira_max_memory_move_cost[mode][cl][0]
 	      = ira_memory_move_cost[mode][cl][0]
-	      = memory_move_cost ((enum machine_mode) mode,
+	      = memory_move_cost ((machine_mode) mode,
 				  (reg_class_t) cl, false);
 	    ira_max_memory_move_cost[mode][cl][1]
 	      = ira_memory_move_cost[mode][cl][1]
-	      = memory_move_cost ((enum machine_mode) mode,
+	      = memory_move_cost ((machine_mode) mode,
 				  (reg_class_t) cl, true);
 	    /* Costs for NO_REGS are used in cost calculation on the
 	       1st pass when the preferred register classes are not
@@ -824,7 +827,7 @@ setup_pressure_classes (void)
 				      ira_prohibited_class_mode_regs[cl][m]);
 	      if (hard_reg_set_empty_p (temp_hard_regset))
 		continue;
-	      ira_init_register_move_cost_if_necessary ((enum machine_mode) m);
+	      ira_init_register_move_cost_if_necessary ((machine_mode) m);
 	      cost = ira_register_move_cost[m][cl][cl];
 	      if (cost <= ira_max_memory_move_cost[m][cl][1]
 		  || cost <= ira_max_memory_move_cost[m][cl][0])
@@ -948,7 +951,7 @@ setup_uniform_class_p (void)
       	  for (m = 0; m < NUM_MACHINE_MODES; m++)
 	    if (contains_reg_of_mode[cl][m] && contains_reg_of_mode[cl2][m])
 	      {
-		ira_init_register_move_cost_if_necessary ((enum machine_mode) m);
+		ira_init_register_move_cost_if_necessary ((machine_mode) m);
 		if (ira_register_move_cost[m][cl][cl]
 		    != ira_register_move_cost[m][cl2][cl2])
 		  break;
@@ -1478,7 +1481,7 @@ setup_reg_class_nregs (void)
       for (cl = 0; cl < N_REG_CLASSES; cl++)
 	ira_reg_class_max_nregs[cl][m]
 	  = ira_reg_class_min_nregs[cl][m]
-	  = targetm.class_max_nregs ((reg_class_t) cl, (enum machine_mode) m);
+	  = targetm.class_max_nregs ((reg_class_t) cl, (machine_mode) m);
       for (cl = 0; cl < N_REG_CLASSES; cl++)
 	for (i = 0;
 	     (cl2 = alloc_reg_class_subclasses[cl][i]) != LIM_REG_CLASSES;
@@ -1510,11 +1513,11 @@ setup_prohibited_class_mode_regs (void)
 	  for (k = ira_class_hard_regs_num[cl] - 1; k >= 0; k--)
 	    {
 	      hard_regno = ira_class_hard_regs[cl][k];
-	      if (! HARD_REGNO_MODE_OK (hard_regno, (enum machine_mode) j))
+	      if (! HARD_REGNO_MODE_OK (hard_regno, (machine_mode) j))
 		SET_HARD_REG_BIT (ira_prohibited_class_mode_regs[cl][j],
 				  hard_regno);
 	      else if (in_hard_reg_set_p (temp_hard_regset,
-					  (enum machine_mode) j, hard_regno))
+					  (machine_mode) j, hard_regno))
 		{
 		  last_hard_regno = hard_regno;
 		  count++;
@@ -1562,7 +1565,7 @@ clarify_prohibited_class_mode_regs (void)
 	    if (!TEST_HARD_REG_BIT (ira_prohibited_class_mode_regs[cl][j],
 				    hard_regno))
 	      add_to_hard_reg_set (&ira_useful_class_mode_regs[cl][j],
-				   (enum machine_mode) j, hard_regno);
+				   (machine_mode) j, hard_regno);
 	  }
       }
 }
@@ -1570,7 +1573,7 @@ clarify_prohibited_class_mode_regs (void)
 /* Allocate and initialize IRA_REGISTER_MOVE_COST, IRA_MAY_MOVE_IN_COST
    and IRA_MAY_MOVE_OUT_COST for MODE.  */
 void
-ira_init_register_move_cost (enum machine_mode mode)
+ira_init_register_move_cost (machine_mode mode)
 {
   static unsigned short last_move_cost[N_REG_CLASSES][N_REG_CLASSES];
   bool all_match = true;
@@ -1745,21 +1748,19 @@ setup_prohibited_mode_move_regs (void)
   if (ira_prohibited_mode_move_regs_initialized_p)
     return;
   ira_prohibited_mode_move_regs_initialized_p = true;
-  test_reg1 = gen_rtx_REG (VOIDmode, 0);
-  test_reg2 = gen_rtx_REG (VOIDmode, 0);
-  move_pat = gen_rtx_SET (VOIDmode, test_reg1, test_reg2);
+  test_reg1 = gen_rtx_REG (word_mode, LAST_VIRTUAL_REGISTER + 1);
+  test_reg2 = gen_rtx_REG (word_mode, LAST_VIRTUAL_REGISTER + 2);
+  move_pat = gen_rtx_SET (test_reg1, test_reg2);
   move_insn = gen_rtx_INSN (VOIDmode, 0, 0, 0, move_pat, 0, -1, 0);
   for (i = 0; i < NUM_MACHINE_MODES; i++)
     {
       SET_HARD_REG_SET (ira_prohibited_mode_move_regs[i]);
       for (j = 0; j < FIRST_PSEUDO_REGISTER; j++)
 	{
-	  if (! HARD_REGNO_MODE_OK (j, (enum machine_mode) i))
+	  if (! HARD_REGNO_MODE_OK (j, (machine_mode) i))
 	    continue;
-	  SET_REGNO_RAW (test_reg1, j);
-	  PUT_MODE (test_reg1, (enum machine_mode) i);
-	  SET_REGNO_RAW (test_reg2, j);
-	  PUT_MODE (test_reg2, (enum machine_mode) i);
+	  set_mode_and_regno (test_reg1, (machine_mode) i, j);
+	  set_mode_and_regno (test_reg2, (machine_mode) i, j);
 	  INSN_CODE (move_insn) = -1;
 	  recog_memoized (move_insn);
 	  if (INSN_CODE (move_insn) < 0)
@@ -1786,7 +1787,6 @@ ira_setup_alts (rtx_insn *insn, HARD_REG_SET &alts)
   int nop, nalt;
   bool curr_swapped;
   const char *p;
-  rtx op;
   int commutative = -1;
 
   extract_insn (insn);
@@ -1828,7 +1828,7 @@ ira_setup_alts (rtx_insn *insn, HARD_REG_SET &alts)
 	    {
 	      int c, len;
 
-	      op = recog_data.operand[nop];
+	      rtx op = recog_data.operand[nop];
 	      p = insn_constraints[nop * recog_data.n_alternatives + nalt];
 	      if (*p == 0 || *p == ',')
 		continue;
@@ -1901,10 +1901,8 @@ ira_setup_alts (rtx_insn *insn, HARD_REG_SET &alts)
 	break;
       if (curr_swapped)
 	break;
-      op = recog_data.operand[commutative];
-      recog_data.operand[commutative] = recog_data.operand[commutative + 1];
-      recog_data.operand[commutative + 1] = op;
-
+      std::swap (recog_data.operand[commutative],
+		 recog_data.operand[commutative + 1]);
     }
 }
 
@@ -2023,8 +2021,8 @@ decrease_live_ranges_number (void)
 {
   basic_block bb;
   rtx_insn *insn;
-  rtx set, src, dest, dest_death, q, note;
-  rtx_insn *p;
+  rtx set, src, dest, dest_death, note;
+  rtx_insn *p, *q;
   int sregno, dregno;
 
   if (! flag_expensive_optimizations)
@@ -2319,19 +2317,20 @@ ira_setup_eliminable_regset (void)
       else
 	df_set_regs_ever_live (eliminables[i].from, true);
     }
-#if !HARD_FRAME_POINTER_IS_FRAME_POINTER
-  if (!TEST_HARD_REG_BIT (crtl->asm_clobbers, HARD_FRAME_POINTER_REGNUM))
+  if (!HARD_FRAME_POINTER_IS_FRAME_POINTER)
     {
-      SET_HARD_REG_BIT (eliminable_regset, HARD_FRAME_POINTER_REGNUM);
-      if (frame_pointer_needed)
-	SET_HARD_REG_BIT (ira_no_alloc_regs, HARD_FRAME_POINTER_REGNUM);
+      if (!TEST_HARD_REG_BIT (crtl->asm_clobbers, HARD_FRAME_POINTER_REGNUM))
+	{
+	  SET_HARD_REG_BIT (eliminable_regset, HARD_FRAME_POINTER_REGNUM);
+	  if (frame_pointer_needed)
+	    SET_HARD_REG_BIT (ira_no_alloc_regs, HARD_FRAME_POINTER_REGNUM);
+	}
+      else if (frame_pointer_needed)
+	error ("%s cannot be used in asm here",
+	       reg_names[HARD_FRAME_POINTER_REGNUM]);
+      else
+	df_set_regs_ever_live (HARD_FRAME_POINTER_REGNUM, true);
     }
-  else if (frame_pointer_needed)
-    error ("%s cannot be used in asm here",
-	   reg_names[HARD_FRAME_POINTER_REGNUM]);
-  else
-    df_set_regs_ever_live (HARD_FRAME_POINTER_REGNUM, true);
-#endif
 
 #else
   if (!TEST_HARD_REG_BIT (crtl->asm_clobbers, HARD_FRAME_POINTER_REGNUM))
@@ -2483,10 +2482,15 @@ calculate_allocation_cost (void)
   if (internal_flag_ira_verbose > 0 && ira_dump_file != NULL)
     {
       fprintf (ira_dump_file,
-	       "+++Costs: overall %d, reg %d, mem %d, ld %d, st %d, move %d\n",
+	       "+++Costs: overall %" PRId64
+	       ", reg %" PRId64
+	       ", mem %" PRId64
+	       ", ld %" PRId64
+	       ", st %" PRId64
+	       ", move %" PRId64,
 	       ira_overall_cost, ira_reg_cost, ira_mem_cost,
 	       ira_load_cost, ira_store_cost, ira_shuffle_cost);
-      fprintf (ira_dump_file, "+++       move loops %d, new jumps %d\n",
+      fprintf (ira_dump_file, "\n+++       move loops %d, new jumps %d\n",
 	       ira_move_loops_num, ira_additional_jumps_num);
     }
 
@@ -2681,20 +2685,22 @@ fix_reg_equiv_init (void)
 {
   int max_regno = max_reg_num ();
   int i, new_regno, max;
-  rtx x, prev, next, insn, set;
+  rtx set;
+  rtx_insn_list *x, *next, *prev;
+  rtx_insn *insn;
 
   if (max_regno_before_ira < max_regno)
     {
       max = vec_safe_length (reg_equivs);
       grow_reg_equivs ();
       for (i = FIRST_PSEUDO_REGISTER; i < max; i++)
-	for (prev = NULL_RTX, x = reg_equiv_init (i);
+	for (prev = NULL, x = reg_equiv_init (i);
 	     x != NULL_RTX;
 	     x = next)
 	  {
-	    next = XEXP (x, 1);
-	    insn = XEXP (x, 0);
-	    set = single_set (as_a <rtx_insn *> (insn));
+	    next = x->next ();
+	    insn = x->insn ();
+	    set = single_set (insn);
 	    ira_assert (set != NULL_RTX
 			&& (REG_P (SET_DEST (set)) || REG_P (SET_SRC (set))));
 	    if (REG_P (SET_DEST (set))
@@ -3933,7 +3939,7 @@ setup_reg_equiv (void)
 		  }
 		else if (function_invariant_p (x))
 		  {
-		    enum machine_mode mode;
+		    machine_mode mode;
 		    
 		    mode = GET_MODE (SET_DEST (set));
 		    if (GET_CODE (x) == PLUS
@@ -4352,6 +4358,12 @@ rtx_moveable_p (rtx *loc, enum op_type type)
     case CLOBBER:
       return rtx_moveable_p (&SET_DEST (x), OP_OUT);
 
+    case UNSPEC_VOLATILE:
+      /* It is a bad idea to consider insns with such rtl
+	 as moveable ones.  The insn scheduler also considers them as barrier
+	 for a reason.  */
+      return false;
+
     default:
       break;
     }
@@ -4528,7 +4540,7 @@ find_moveable_pseudos (void)
 	    df_ref def, use;
 	    unsigned regno;
 	    bool all_dominated, all_local;
-	    enum machine_mode mode;
+	    machine_mode mode;
 
 	    def = df_single_def (insn_info);
 	    /* There must be exactly one def in this insn.  */
@@ -4608,15 +4620,14 @@ find_moveable_pseudos (void)
 			   ? " (no unique first use)" : "");
 		continue;
 	      }
-#ifdef HAVE_cc0
-	    if (reg_referenced_p (cc0_rtx, PATTERN (closest_use)))
+	    if (HAVE_cc0 && reg_referenced_p (cc0_rtx, PATTERN (closest_use)))
 	      {
 		if (dump_file)
 		  fprintf (dump_file, "Reg %d: closest user uses cc0\n",
 			   regno);
 		continue;
 	      }
-#endif
+
 	    bitmap_set_bit (&interesting, regno);
 	    /* If we get here, we know closest_use is a non-NULL insn
 	       (as opposed to const_0_rtx).  */
@@ -4691,10 +4702,7 @@ find_moveable_pseudos (void)
 	    {
 	      if (bitmap_bit_p (def_bb_moveable, regno)
 		  && !control_flow_insn_p (use_insn)
-#ifdef HAVE_cc0
-		  && !sets_cc0_p (use_insn)
-#endif
-		  )
+		  && (!HAVE_cc0 || !sets_cc0_p (use_insn)))
 		{
 		  if (modified_between_p (DF_REF_REG (use), def_insn, use_insn))
 		    {
@@ -4961,7 +4969,7 @@ split_live_ranges_for_shrink_wrap (void)
 
       if (newreg)
 	{
-	  rtx new_move = gen_move_insn (newreg, dest);
+	  rtx_insn *new_move = gen_move_insn (newreg, dest);
 	  emit_insn_after (new_move, bb_note (call_dom));
 	  if (dump_file)
 	    {
@@ -5257,7 +5265,18 @@ ira (FILE *f)
 	      ira_allocno_iterator ai;
 
 	      FOR_EACH_ALLOCNO (a, ai)
-		ALLOCNO_REGNO (a) = REGNO (ALLOCNO_EMIT_DATA (a)->reg);
+                {
+                  int old_regno = ALLOCNO_REGNO (a);
+                  int new_regno = REGNO (ALLOCNO_EMIT_DATA (a)->reg);
+
+                  ALLOCNO_REGNO (a) = new_regno;
+
+                  if (old_regno != new_regno)
+                    setup_reg_classes (new_regno, reg_preferred_class (old_regno),
+                                       reg_alternate_class (old_regno),
+                                       reg_allocno_class (old_regno));
+                }
+
 	    }
 	  else
 	    {
@@ -5399,7 +5418,8 @@ do_reload (void)
 
   if (internal_flag_ira_verbose > 0 && ira_dump_file != NULL
       && overall_cost_before != ira_overall_cost)
-    fprintf (ira_dump_file, "+++Overall after reload %d\n", ira_overall_cost);
+    fprintf (ira_dump_file, "+++Overall after reload %" PRId64 "\n",
+	     ira_overall_cost);
 
   flag_ira_share_spill_slots = saved_flag_ira_share_spill_slots;
 
@@ -5492,6 +5512,10 @@ public:
   {}
 
   /* opt_pass methods: */
+  virtual bool gate (function *)
+    {
+      return !targetm.no_register_allocation;
+    }
   virtual unsigned int execute (function *)
     {
       ira (dump_file);
@@ -5531,6 +5555,10 @@ public:
   {}
 
   /* opt_pass methods: */
+  virtual bool gate (function *)
+    {
+      return !targetm.no_register_allocation;
+    }
   virtual unsigned int execute (function *)
     {
       do_reload ();

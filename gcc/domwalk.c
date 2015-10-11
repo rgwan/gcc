@@ -1,5 +1,5 @@
 /* Generic dominator tree walker
-   Copyright (C) 2003-2014 Free Software Foundation, Inc.
+   Copyright (C) 2003-2015 Free Software Foundation, Inc.
    Contributed by Diego Novillo <dnovillo@redhat.com>
 
 This file is part of GCC.
@@ -21,10 +21,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "basic-block.h"
+#include "backend.h"
+#include "hard-reg-set.h"
+#include "cfganal.h"
 #include "domwalk.h"
-#include "sbitmap.h"
 
 /* This file implements a generic walker for dominator trees.
 

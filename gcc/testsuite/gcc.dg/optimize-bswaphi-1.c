@@ -42,11 +42,10 @@ uint32_t read_be16_3 (unsigned char *data)
   return *(data + 1) | (*data << 8);
 }
 
-typedef int SItype __attribute__ ((mode (SI)));
 typedef int HItype __attribute__ ((mode (HI)));
 
 /* Test that detection of significant sign extension works correctly. This
-   checks that unknown byte marker are set correctly in cast of cast.  */
+   checks that unknown byte markers are set correctly in cast of cast.  */
 
 HItype
 swap16 (HItype in)
@@ -58,4 +57,3 @@ swap16 (HItype in)
 /* { dg-final { scan-tree-dump-times "16 bit load in target endianness found at" 3 "bswap" } } */
 /* { dg-final { scan-tree-dump-times "16 bit bswap implementation found at" 1 "bswap" { target alpha*-*-* arm*-*-* } } } */
 /* { dg-final { scan-tree-dump-times "16 bit bswap implementation found at" 4 "bswap" { xfail alpha*-*-* arm*-*-* } } } */
-/* { dg-final { cleanup-tree-dump "bswap" } } */

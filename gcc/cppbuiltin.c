@@ -1,5 +1,5 @@
 /* Define builtin-in macros for all front ends that perform preprocessing
-   Copyright (C) 2010-2014 Free Software Foundation, Inc.
+   Copyright (C) 2010-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,6 +21,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "version.h"
 #include "flags.h"
@@ -102,11 +103,16 @@ define_builtin_macros_for_compilation_flags (cpp_reader *pfile)
     cpp_define (pfile, "__FAST_MATH__");
   if (flag_signaling_nans)
     cpp_define (pfile, "__SUPPORT_SNAN__");
+  if (!flag_errno_math)
+    cpp_define (pfile, "__NO_MATH_ERRNO__");
 
   cpp_define_formatted (pfile, "__FINITE_MATH_ONLY__=%d",
 			flag_finite_math_only);
   if (flag_cilkplus)
     cpp_define (pfile, "__cilk=200");
+
+  if (flag_check_pointer_bounds)
+    cpp_define (pfile, "__CHKP__");
 }
 
 
@@ -129,7 +135,7 @@ static void
 define_builtin_macros_for_type_sizes (cpp_reader *pfile)
 {
 #define define_type_sizeof(NAME, TYPE)                             \
-    cpp_define_formatted (pfile, NAME"="HOST_WIDE_INT_PRINT_DEC,   \
+    cpp_define_formatted (pfile, NAME"=" HOST_WIDE_INT_PRINT_DEC,   \
                           tree_to_uhwi (TYPE_SIZE_UNIT (TYPE)))
 
   define_type_sizeof ("__SIZEOF_INT__", integer_type_node);

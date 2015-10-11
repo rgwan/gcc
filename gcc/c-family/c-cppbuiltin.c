@@ -1,5 +1,5 @@
 /* Define builtin-in macros for the C family front ends.
-   Copyright (C) 2002-2014 Free Software Foundation, Inc.
+   Copyright (C) 2002-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,6 +21,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "stor-layout.h"
 #include "stringpool.h"
@@ -49,8 +50,6 @@ along with GCC; see the file COPYING3.  If not see
 #endif
 
 /* Non-static as some targets don't use it.  */
-void builtin_define_std (const char *) ATTRIBUTE_UNUSED;
-static void builtin_define_with_int_value (const char *, HOST_WIDE_INT);
 static void builtin_define_with_hex_fp_value (const char *, tree,
 					      int, const char *,
 					      const char *,
@@ -59,7 +58,6 @@ static void builtin_define_stdint_macros (void);
 static void builtin_define_constants (const char *, tree);
 static void builtin_define_type_max (const char *, tree);
 static void builtin_define_type_minmax (const char *, const char *, tree);
-static void builtin_define_type_sizeof (const char *, tree);
 static void builtin_define_float_constants (const char *,
 					    const char *,
 					    const char *,
@@ -72,7 +70,7 @@ static void builtin_define_float_constants (const char *,
    point types.  */
 
 static bool
-mode_has_fma (enum machine_mode mode)
+mode_has_fma (machine_mode mode)
 {
   switch (mode)
     {
@@ -104,7 +102,7 @@ mode_has_fma (enum machine_mode mode)
 }
 
 /* Define NAME with value TYPE size_unit.  */
-static void
+void
 builtin_define_type_sizeof (const char *name, tree type)
 {
   builtin_define_with_int_value (name,
@@ -549,6 +547,11 @@ c_cpp_builtins_optimize_pragma (cpp_reader *pfile, tree prev_tree,
   else if (prev->x_flag_signaling_nans && !cur->x_flag_signaling_nans)
     cpp_undef (pfile, "__SUPPORT_SNAN__");
 
+  if (!prev->x_flag_errno_math && cur->x_flag_errno_math)
+    cpp_undef (pfile, "__NO_MATH_ERRNO__");
+  else if (prev->x_flag_errno_math && !cur->x_flag_errno_math)
+    cpp_define (pfile, "__NO_MATH_ERRNO__");
+
   if (!prev->x_flag_finite_math_only && cur->x_flag_finite_math_only)
     {
       cpp_undef (pfile, "__FINITE_MATH_ONLY__");
@@ -790,7 +793,7 @@ c_cpp_builtins (cpp_reader *pfile)
   c_stddef_cpp_builtins ();
 
   /* Set include test macros for all C/C++ (not for just C++11 etc.)
-     the builtins __has_include__ and __has_include_next__ are defined
+     The builtins __has_include__ and __has_include_next__ are defined
      in libcpp.  */
   cpp_define (pfile, "__has_include(STR)=__has_include__(STR)");
   cpp_define (pfile, "__has_include_next(STR)=__has_include_next__(STR)");
@@ -806,7 +809,10 @@ c_cpp_builtins (cpp_reader *pfile)
 	cpp_define (pfile, "__DEPRECATED");
 
       if (flag_rtti)
-	cpp_define (pfile, "__GXX_RTTI");
+	{
+	  cpp_define (pfile, "__GXX_RTTI");
+	  cpp_define (pfile, "__cpp_rtti=199711");
+	}
 
       if (cxx_dialect >= cxx11)
         cpp_define (pfile, "__GXX_EXPERIMENTAL_CXX0X__");
@@ -815,57 +821,77 @@ c_cpp_builtins (cpp_reader *pfile)
 	 and were standardized for C++14.  */
       if (!pedantic || cxx_dialect > cxx11)
 	cpp_define (pfile, "__cpp_binary_literals=201304");
+
+      /* Arrays of runtime bound were removed from C++14, but we still
+	 support GNU VLAs.  Let's define this macro to a low number
+	 (corresponding to the initial test release of GNU C++) if we won't
+	 complain about use of VLAs.  */
+      if (c_dialect_cxx ()
+	  && (pedantic ? warn_vla == 0 : warn_vla <= 0))
+	cpp_define (pfile, "__cpp_runtime_arrays=198712");
+
       if (cxx_dialect >= cxx11)
 	{
-	  /* Set feature test macros for C++11  */
+	  /* Set feature test macros for C++11.  */
 	  cpp_define (pfile, "__cpp_unicode_characters=200704");
 	  cpp_define (pfile, "__cpp_raw_strings=200710");
 	  cpp_define (pfile, "__cpp_unicode_literals=200710");
 	  cpp_define (pfile, "__cpp_user_defined_literals=200809");
 	  cpp_define (pfile, "__cpp_lambdas=200907");
-	  cpp_define (pfile, "__cpp_constexpr=200704");
-	  cpp_define (pfile, "__cpp_static_assert=200410");
+	  if (cxx_dialect == cxx11)
+	    cpp_define (pfile, "__cpp_constexpr=200704");
+	  cpp_define (pfile, "__cpp_range_based_for=200907");
+	  if (cxx_dialect <= cxx14)
+	    cpp_define (pfile, "__cpp_static_assert=200410");
 	  cpp_define (pfile, "__cpp_decltype=200707");
 	  cpp_define (pfile, "__cpp_attributes=200809");
 	  cpp_define (pfile, "__cpp_rvalue_reference=200610");
 	  cpp_define (pfile, "__cpp_variadic_templates=200704");
+	  cpp_define (pfile, "__cpp_initializer_lists=200806");
+	  cpp_define (pfile, "__cpp_delegating_constructors=200604");
+	  cpp_define (pfile, "__cpp_nsdmi=200809");
+	  cpp_define (pfile, "__cpp_inheriting_constructors=200802");
+	  cpp_define (pfile, "__cpp_ref_qualifiers=200710");
 	  cpp_define (pfile, "__cpp_alias_templates=200704");
-	  cpp_define (pfile, "__cpp_attribute_deprecated=201309");
 	}
       if (cxx_dialect > cxx11)
 	{
-	  /* Set feature test macros for C++14  */
+	  /* Set feature test macros for C++14.  */
 	  cpp_define (pfile, "__cpp_return_type_deduction=201304");
 	  cpp_define (pfile, "__cpp_init_captures=201304");
 	  cpp_define (pfile, "__cpp_generic_lambdas=201304");
-	  //cpp_undef (pfile, "__cpp_constexpr");
-	  //cpp_define (pfile, "__cpp_constexpr=201304");
+	  cpp_define (pfile, "__cpp_constexpr=201304");
 	  cpp_define (pfile, "__cpp_decltype_auto=201304");
-	  //cpp_define (pfile, "__cpp_aggregate_nsdmi=201304");
+	  cpp_define (pfile, "__cpp_aggregate_nsdmi=201304");
 	  cpp_define (pfile, "__cpp_variable_templates=201304");
 	  cpp_define (pfile, "__cpp_digit_separators=201309");
-	  //cpp_define (pfile, "__cpp_sized_deallocation=201309");
-	  /* We'll have to see where runtime arrays wind up.
-	     Let's put it in C++14 for now.  */
-	  cpp_define (pfile, "__cpp_runtime_arrays=201304");
 	}
+      if (cxx_dialect > cxx14)
+	{
+	  /* Set feature test macros for C++1z.  */
+	  cpp_define (pfile, "__cpp_static_assert=201411");
+	}
+      if (flag_concepts)
+	/* Use a value smaller than the 201507 specified in
+	   the TS, since we don't yet support extended auto.  */
+	cpp_define (pfile, "__cpp_concepts=201500");
+      if (flag_sized_deallocation)
+	cpp_define (pfile, "__cpp_sized_deallocation=201309");
     }
   /* Note that we define this for C as well, so that we know if
      __attribute__((cleanup)) will interface with EH.  */
   if (flag_exceptions)
-    cpp_define (pfile, "__EXCEPTIONS");
+    {
+      cpp_define (pfile, "__EXCEPTIONS");
+      if (c_dialect_cxx ())
+	cpp_define (pfile, "__cpp_exceptions=199711");
+    }
 
   /* Represents the C++ ABI version, always defined so it can be used while
      preprocessing C and assembler.  */
   if (flag_abi_version == 0)
-    /* Use a very large value so that:
-
-	 #if __GXX_ABI_VERSION >= <value for version X>
-
-       will work whether the user explicitly says "-fabi-version=x" or
-       "-fabi-version=0".  Do not use INT_MAX because that will be
-       different from system to system.  */
-    builtin_define_with_int_value ("__GXX_ABI_VERSION", 999999);
+    /* We should have set this to something real in c_common_post_options.  */
+    gcc_unreachable ();
   else if (flag_abi_version == 1)
     /* Due to a historical accident, this version had the value
        "102".  */
@@ -1006,7 +1032,7 @@ c_cpp_builtins (cpp_reader *pfile)
   if (flag_building_libgcc)
     {
       /* Properties of floating-point modes for libgcc2.c.  */
-      for (enum machine_mode mode = GET_CLASS_NARROWEST_MODE (MODE_FLOAT);
+      for (machine_mode mode = GET_CLASS_NARROWEST_MODE (MODE_FLOAT);
 	   mode != VOIDmode;
 	   mode = GET_MODE_WIDER_MODE (mode))
 	{
@@ -1111,9 +1137,8 @@ c_cpp_builtins (cpp_reader *pfile)
 				     TRAMPOLINE_SIZE);
 
       /* For libgcc generic-morestack.c and unwinder code.  */
-#ifdef STACK_GROWS_DOWNWARD
-      cpp_define (pfile, "__LIBGCC_STACK_GROWS_DOWNWARD__");
-#endif
+      if (STACK_GROWS_DOWNWARD)
+	cpp_define (pfile, "__LIBGCC_STACK_GROWS_DOWNWARD__");
 
       /* For libgcc unwinder code.  */
 #ifdef DONT_USE_BUILTIN_SETJMP
@@ -1179,12 +1204,17 @@ c_cpp_builtins (cpp_reader *pfile)
   /* Make the choice of the stack protector runtime visible to source code.
      The macro names and values here were chosen for compatibility with an
      earlier implementation, i.e. ProPolice.  */
+  if (flag_stack_protect == 4)
+    cpp_define (pfile, "__SSP_EXPLICIT__=4");
   if (flag_stack_protect == 3)
     cpp_define (pfile, "__SSP_STRONG__=3");
   if (flag_stack_protect == 2)
     cpp_define (pfile, "__SSP_ALL__=2");
   else if (flag_stack_protect == 1)
     cpp_define (pfile, "__SSP__=1");
+
+  if (flag_openacc)
+    cpp_define (pfile, "_OPENACC=201306");
 
   if (flag_openmp)
     cpp_define (pfile, "_OPENMP=201307");
@@ -1340,7 +1370,7 @@ builtin_define_with_value (const char *macro, const char *expansion, int is_str)
 
 
 /* Pass an object-like macro and an integer value to define it to.  */
-static void
+void
 builtin_define_with_int_value (const char *macro, HOST_WIDE_INT value)
 {
   char *buf;
@@ -1364,7 +1394,7 @@ struct GTY(()) lazy_hex_fp_value_struct
 {
   const char *hex_str;
   cpp_macro *macro;
-  enum machine_mode mode;
+  machine_mode mode;
   int digits;
   const char *fp_suffix;
 };

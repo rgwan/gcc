@@ -1,4 +1,4 @@
-/* Copyright (C) 2002-2014 Free Software Foundation, Inc.
+/* Copyright (C) 2002-2015 Free Software Foundation, Inc.
    Contributed by Andy Vaught
    F2003 I/O support contributed by Jerry DeLisle
 
@@ -101,6 +101,12 @@ id_from_fd (const int fd)
 }
 
 #endif /* HAVE_WORKING_STAT */
+
+
+/* On mingw, we don't use umask in tempfile_open(), because it
+   doesn't support the user/group/other-based permissions.  */
+#undef HAVE_UMASK
+
 #endif /* __MINGW32__ */
 
 
@@ -1353,7 +1359,7 @@ regular_file2 (const char *path, st_parameter_open *opp, unit_flags *flags)
       flags->action = ACTION_READWRITE;
       return fd;
     }
-  if (errno != EACCES && errno != EROFS)
+  if (errno != EACCES && errno != EPERM && errno != EROFS)
      return fd;
 
   /* retry for read-only access */
@@ -1369,7 +1375,7 @@ regular_file2 (const char *path, st_parameter_open *opp, unit_flags *flags)
       return fd;		/* success */
     }
   
-  if (errno != EACCES && errno != ENOENT)
+  if (errno != EACCES && errno != EPERM && errno != ENOENT)
     return fd;			/* failure */
 
   /* retry for write-only access */
@@ -1525,7 +1531,10 @@ compare_file_filename (gfc_unit *u, const char *name, int len)
       goto done;
     }
 # endif
-  ret = (strcmp(path, u->filename) == 0);
+  if (u->filename)
+    ret = (strcmp(path, u->filename) == 0);
+  else
+    ret = 0;
 #endif
  done:
   free (path);
@@ -1570,7 +1579,7 @@ find_file0 (gfc_unit *u, FIND_FILE0_DECL)
     }
   else
 # endif
-    if (strcmp (u->filename, path) == 0)
+    if (u->filename && strcmp (u->filename, path) == 0)
       return u;
 #endif
 

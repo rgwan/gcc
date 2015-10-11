@@ -1,5 +1,5 @@
 /* The Blackfin code generation auxiliary output file.
-   Copyright (C) 2005-2014 Free Software Foundation, Inc.
+   Copyright (C) 2005-2015 Free Software Foundation, Inc.
    Contributed by Analog Devices.
 
    This file is part of GCC.
@@ -21,34 +21,39 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
+#include "tree.h"
 #include "rtl.h"
+#include "df.h"
 #include "regs.h"
-#include "hard-reg-set.h"
 #include "insn-config.h"
 #include "insn-codes.h"
 #include "conditions.h"
 #include "insn-flags.h"
 #include "output.h"
 #include "insn-attr.h"
-#include "tree.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "varasm.h"
 #include "calls.h"
 #include "flags.h"
 #include "except.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
 #include "target.h"
-#include "target-def.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "emit-rtl.h"
+#include "stmt.h"
 #include "expr.h"
 #include "diagnostic-core.h"
 #include "recog.h"
 #include "optabs.h"
-#include "ggc.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "lcm.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "cgraph.h"
 #include "langhooks.h"
 #include "bfin-protos.h"
@@ -56,14 +61,15 @@
 #include "tm-preds.h"
 #include "tm-constrs.h"
 #include "gt-bfin.h"
-#include "basic-block.h"
 #include "timevar.h"
-#include "df.h"
 #include "sel-sched.h"
 #include "hw-doloop.h"
 #include "opts.h"
 #include "dumpfile.h"
 #include "builtins.h"
+
+/* This file should be included last.  */
+#include "target-def.h"
 
 /* A C structure for machine-specific, per-function data.
    This is added to the cfun structure.  */
@@ -373,7 +379,7 @@ expand_prologue_reg_save (rtx spreg, int saveall, bool is_inthandler)
 
       XVECEXP (pat, 0, 0) = gen_rtx_UNSPEC (VOIDmode, gen_rtvec (1, val),
 					    UNSPEC_PUSH_MULTIPLE);
-      XVECEXP (pat, 0, total_consec + 1) = gen_rtx_SET (VOIDmode, spreg,
+      XVECEXP (pat, 0, total_consec + 1) = gen_rtx_SET (spreg,
 							gen_rtx_PLUS (Pmode,
 								      spreg,
 								      val));
@@ -389,14 +395,12 @@ expand_prologue_reg_save (rtx spreg, int saveall, bool is_inthandler)
 	  rtx subpat;
 	  if (d_to_save > 0)
 	    {
-	      subpat = gen_rtx_SET (VOIDmode, memref, gen_rtx_REG (word_mode,
-								   dregno++));
+	      subpat = gen_rtx_SET (memref, gen_rtx_REG (word_mode, dregno++));
 	      d_to_save--;
 	    }
 	  else
 	    {
-	      subpat = gen_rtx_SET (VOIDmode, memref, gen_rtx_REG (word_mode,
-								   pregno++));
+	      subpat = gen_rtx_SET (memref, gen_rtx_REG (word_mode, pregno++));
 	    }
 	  XVECEXP (pat, 0, i + 1) = subpat;
 	  RTX_FRAME_RELATED_P (subpat) = 1;
@@ -503,9 +507,8 @@ expand_epilogue_reg_restore (rtx spreg, bool saveall, bool is_inthandler)
     {
       rtx pat = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (total_consec + 1));
       XVECEXP (pat, 0, 0)
-	= gen_rtx_SET (VOIDmode, spreg,
-		       gen_rtx_PLUS (Pmode, spreg,
-				     GEN_INT (total_consec * 4)));
+	= gen_rtx_SET (spreg, gen_rtx_PLUS (Pmode, spreg,
+					    GEN_INT (total_consec * 4)));
 
       if (npregs_consec > 0)
 	regno = REG_P5 + 1;
@@ -521,7 +524,7 @@ expand_epilogue_reg_restore (rtx spreg, bool saveall, bool is_inthandler)
 
 	  regno--;
 	  XVECEXP (pat, 0, i + 1)
-	    = gen_rtx_SET (VOIDmode, gen_rtx_REG (word_mode, regno), memref);
+	    = gen_rtx_SET (gen_rtx_REG (word_mode, regno), memref);
 
 	  if (npregs_consec > 0)
 	    {
@@ -570,7 +573,7 @@ expand_epilogue_reg_restore (rtx spreg, bool saveall, bool is_inthandler)
 
 static void
 setup_incoming_varargs (cumulative_args_t cum,
-			enum machine_mode mode ATTRIBUTE_UNUSED,
+			machine_mode mode ATTRIBUTE_UNUSED,
 			tree type ATTRIBUTE_UNUSED, int *pretend_size,
 			int no_rtl)
 {
@@ -1081,6 +1084,9 @@ bfin_expand_prologue (void)
   tree attrs = TYPE_ATTRIBUTES (TREE_TYPE (current_function_decl));
   bool all = lookup_attribute ("saveall", attrs) != NULL_TREE;
 
+  if (flag_stack_usage_info)
+    current_function_static_stack_size = frame_size;
+
   if (fkind != SUBROUTINE)
     {
       expand_interrupt_handler_prologue (spreg, fkind, all);
@@ -1244,7 +1250,7 @@ bfin_delegitimize_address (rtx orig_x)
    32-bit instruction.  */
 
 int
-effective_address_32bit_p (rtx op, enum machine_mode mode) 
+effective_address_32bit_p (rtx op, machine_mode mode) 
 {
   HOST_WIDE_INT offset;
 
@@ -1298,7 +1304,7 @@ bfin_dsp_memref_p (rtx x)
 
 static int
 bfin_address_cost (rtx addr ATTRIBUTE_UNUSED,
-		   enum machine_mode mode ATTRIBUTE_UNUSED,
+		   machine_mode mode ATTRIBUTE_UNUSED,
 		   addr_space_t as ATTRIBUTE_UNUSED,
 		   bool speed ATTRIBUTE_UNUSED)
 {
@@ -1346,7 +1352,7 @@ print_address_operand (FILE *file, rtx x)
 void
 print_operand (FILE *file, rtx x, char code)
 {
-  enum machine_mode mode;
+  machine_mode mode;
 
   if (code == '!')
     {
@@ -1661,7 +1667,7 @@ init_cumulative_args (CUMULATIVE_ARGS *cum, tree fntype,
    (TYPE is null for libcalls where that information may not be available.)  */
 
 static void
-bfin_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
+bfin_function_arg_advance (cumulative_args_t cum_v, machine_mode mode,
 			   const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -1701,7 +1707,7 @@ bfin_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
     (otherwise it is an extra parameter matching an ellipsis).  */
 
 static rtx
-bfin_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
+bfin_function_arg (cumulative_args_t cum_v, machine_mode mode,
 		   const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -1731,7 +1737,7 @@ bfin_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
    stack.   */
 
 static int
-bfin_arg_partial_bytes (cumulative_args_t cum, enum machine_mode mode,
+bfin_arg_partial_bytes (cumulative_args_t cum, machine_mode mode,
 			tree type ATTRIBUTE_UNUSED,
 			bool named ATTRIBUTE_UNUSED)
 {
@@ -1753,7 +1759,7 @@ bfin_arg_partial_bytes (cumulative_args_t cum, enum machine_mode mode,
 
 static bool
 bfin_pass_by_reference (cumulative_args_t cum ATTRIBUTE_UNUSED,
-			enum machine_mode mode ATTRIBUTE_UNUSED,
+			machine_mode mode ATTRIBUTE_UNUSED,
 			const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   return type && TREE_CODE (TYPE_SIZE (type)) != INTEGER_CST;
@@ -1918,7 +1924,7 @@ bfin_trampoline_init (rtx m_tramp, tree fndecl, rtx chain_value)
 /* Emit insns to move operands[1] into operands[0].  */
 
 void
-emit_pic_move (rtx *operands, enum machine_mode mode ATTRIBUTE_UNUSED)
+emit_pic_move (rtx *operands, machine_mode mode ATTRIBUTE_UNUSED)
 {
   rtx temp = reload_in_progress ? operands[0] : gen_reg_rtx (Pmode);
 
@@ -1936,7 +1942,7 @@ emit_pic_move (rtx *operands, enum machine_mode mode ATTRIBUTE_UNUSED)
    should generate an insn to move OPERANDS[1] to OPERANDS[0].  */
 
 bool
-expand_move (rtx *operands, enum machine_mode mode)
+expand_move (rtx *operands, machine_mode mode)
 {
   rtx op = operands[1];
   if ((TARGET_ID_SHARED_LIBRARY || TARGET_FDPIC)
@@ -2107,7 +2113,7 @@ bfin_expand_call (rtx retval, rtx fnaddr, rtx callarg1, rtx cookie, int sibcall)
   call = gen_rtx_CALL (VOIDmode, fnaddr, callarg1);
 
   if (retval)
-    call = gen_rtx_SET (VOIDmode, retval, call);
+    call = gen_rtx_SET (retval, call);
 
   pat = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (nelts));
   n = 0;
@@ -2127,7 +2133,7 @@ bfin_expand_call (rtx retval, rtx fnaddr, rtx callarg1, rtx cookie, int sibcall)
 /* Return 1 if hard register REGNO can hold a value of machine-mode MODE.  */
 
 int
-hard_regno_mode_ok (int regno, enum machine_mode mode)
+hard_regno_mode_ok (int regno, machine_mode mode)
 {
   /* Allow only dregs to store value of mode HI or QI */
   enum reg_class rclass = REGNO_REG_CLASS (regno);
@@ -2157,7 +2163,7 @@ hard_regno_mode_ok (int regno, enum machine_mode mode)
 /* Implements target hook vector_mode_supported_p.  */
 
 static bool
-bfin_vector_mode_supported_p (enum machine_mode mode)
+bfin_vector_mode_supported_p (machine_mode mode)
 {
   return mode == V2HImode;
 }
@@ -2165,7 +2171,7 @@ bfin_vector_mode_supported_p (enum machine_mode mode)
 /* Worker function for TARGET_REGISTER_MOVE_COST.  */
 
 static int
-bfin_register_move_cost (enum machine_mode mode,
+bfin_register_move_cost (machine_mode mode,
 			 reg_class_t class1, reg_class_t class2)
 {
   /* These need secondary reloads, so they're more expensive.  */
@@ -2196,7 +2202,7 @@ bfin_register_move_cost (enum machine_mode mode,
    program; it'll make the costs more accurate.  */
 
 static int
-bfin_memory_move_cost (enum machine_mode mode ATTRIBUTE_UNUSED,
+bfin_memory_move_cost (machine_mode mode ATTRIBUTE_UNUSED,
 		       reg_class_t rclass,
 		       bool in ATTRIBUTE_UNUSED)
 {
@@ -2215,7 +2221,7 @@ bfin_memory_move_cost (enum machine_mode mode ATTRIBUTE_UNUSED,
 
 static reg_class_t
 bfin_secondary_reload (bool in_p, rtx x, reg_class_t rclass_i,
-		       enum machine_mode mode, secondary_reload_info *sri)
+		       machine_mode mode, secondary_reload_info *sri)
 {
   /* If we have HImode or QImode, we can only use DREGS as secondary registers;
      in most other cases we can also use PREGS.  */
@@ -2499,7 +2505,7 @@ asm_conditional_branch (rtx_insn *insn, rtx *operands, int n_nops, int predict_t
    stored in bfin_compare_op0 and bfin_compare_op1 already.  */
 
 rtx
-bfin_gen_compare (rtx cmp, enum machine_mode mode ATTRIBUTE_UNUSED)
+bfin_gen_compare (rtx cmp, machine_mode mode ATTRIBUTE_UNUSED)
 {
   enum rtx_code code1, code2;
   rtx op0 = XEXP (cmp, 0), op1 = XEXP (cmp, 1);
@@ -2530,8 +2536,7 @@ bfin_gen_compare (rtx cmp, enum machine_mode mode ATTRIBUTE_UNUSED)
 	code2 = EQ;
 	break;
       }
-      emit_insn (gen_rtx_SET (VOIDmode, tem,
-			      gen_rtx_fmt_ee (code1, BImode, op0, op1)));
+      emit_insn (gen_rtx_SET (tem, gen_rtx_fmt_ee (code1, BImode, op0, op1)));
     }
 
   return gen_rtx_fmt_ee (code2, BImode, tem, CONST0_RTX (BImode));
@@ -2669,7 +2674,7 @@ split_load_immediate (rtx operands[])
    MODE.  Return false if not.  */
 
 static bool
-bfin_valid_add (enum machine_mode mode, HOST_WIDE_INT value)
+bfin_valid_add (machine_mode mode, HOST_WIDE_INT value)
 {
   unsigned HOST_WIDE_INT v = value > 0 ? value : -value;
   int sz = GET_MODE_SIZE (mode);
@@ -2682,7 +2687,7 @@ bfin_valid_add (enum machine_mode mode, HOST_WIDE_INT value)
 }
 
 static bool
-bfin_valid_reg_p (unsigned int regno, int strict, enum machine_mode mode,
+bfin_valid_reg_p (unsigned int regno, int strict, machine_mode mode,
 		  enum rtx_code outer_code)
 {
   if (strict)
@@ -2710,7 +2715,7 @@ bfin_valid_reg_p (unsigned int regno, int strict, enum machine_mode mode,
 */
 
 static bool
-bfin_legitimate_address_p (enum machine_mode mode, rtx x, bool strict)
+bfin_legitimate_address_p (machine_mode mode, rtx x, bool strict)
 {
   switch (GET_CODE (x)) {
   case REG:
@@ -2749,7 +2754,7 @@ bfin_legitimate_address_p (enum machine_mode mode, rtx x, bool strict)
    another way.  */
 
 static bool
-bfin_cannot_force_const_mem (enum machine_mode mode ATTRIBUTE_UNUSED,
+bfin_cannot_force_const_mem (machine_mode mode ATTRIBUTE_UNUSED,
 			     rtx x ATTRIBUTE_UNUSED)
 {
   /* We have only one class of non-legitimate constants, and our movsi
@@ -2765,7 +2770,7 @@ bfin_cannot_force_const_mem (enum machine_mode mode ATTRIBUTE_UNUSED,
    crossing section boundaries.  */
 
 static bool
-bfin_legitimate_constant_p (enum machine_mode mode ATTRIBUTE_UNUSED, rtx x)
+bfin_legitimate_constant_p (machine_mode mode ATTRIBUTE_UNUSED, rtx x)
 {
   rtx sym;
   HOST_WIDE_INT offset;
@@ -2793,10 +2798,10 @@ bfin_legitimate_constant_p (enum machine_mode mode ATTRIBUTE_UNUSED, rtx x)
 }
 
 static bool
-bfin_rtx_costs (rtx x, int code_i, int outer_code_i, int opno, int *total,
-		bool speed)
+bfin_rtx_costs (rtx x, machine_mode mode, int outer_code_i, int opno,
+		int *total, bool speed)
 {
-  enum rtx_code code = (enum rtx_code) code_i;
+  enum rtx_code code = GET_CODE (x);
   enum rtx_code outer_code = (enum rtx_code) outer_code_i;
   int cost2 = COSTS_N_INSNS (1);
   rtx op0, op1;
@@ -2835,7 +2840,7 @@ bfin_rtx_costs (rtx x, int code_i, int outer_code_i, int opno, int *total,
     case PLUS:
       op0 = XEXP (x, 0);
       op1 = XEXP (x, 1);
-      if (GET_MODE (x) == SImode)
+      if (mode == SImode)
 	{
 	  if (GET_CODE (op0) == MULT
 	      && GET_CODE (XEXP (op0, 1)) == CONST_INT)
@@ -2844,35 +2849,36 @@ bfin_rtx_costs (rtx x, int code_i, int outer_code_i, int opno, int *total,
 	      if (val == 2 || val == 4)
 		{
 		  *total = cost2;
-		  *total += rtx_cost (XEXP (op0, 0), outer_code, opno, speed);
-		  *total += rtx_cost (op1, outer_code, opno, speed);
+		  *total += rtx_cost (XEXP (op0, 0), mode, outer_code,
+				      opno, speed);
+		  *total += rtx_cost (op1, mode, outer_code, opno, speed);
 		  return true;
 		}
 	    }
 	  *total = cost2;
 	  if (GET_CODE (op0) != REG
 	      && (GET_CODE (op0) != SUBREG || GET_CODE (SUBREG_REG (op0)) != REG))
-	    *total += set_src_cost (op0, speed);
+	    *total += set_src_cost (op0, mode, speed);
 #if 0 /* We'd like to do this for accuracy, but it biases the loop optimizer
 	 towards creating too many induction variables.  */
 	  if (!reg_or_7bit_operand (op1, SImode))
-	    *total += set_src_cost (op1, speed);
+	    *total += set_src_cost (op1, mode, speed);
 #endif
 	}
-      else if (GET_MODE (x) == DImode)
+      else if (mode == DImode)
 	{
 	  *total = 6 * cost2;
 	  if (GET_CODE (op1) != CONST_INT
 	      || !satisfies_constraint_Ks7 (op1))
-	    *total += rtx_cost (op1, PLUS, 1, speed);
+	    *total += rtx_cost (op1, mode, PLUS, 1, speed);
 	  if (GET_CODE (op0) != REG
 	      && (GET_CODE (op0) != SUBREG || GET_CODE (SUBREG_REG (op0)) != REG))
-	    *total += rtx_cost (op0, PLUS, 0, speed);
+	    *total += rtx_cost (op0, mode, PLUS, 0, speed);
 	}
       return true;
 
     case MINUS:
-      if (GET_MODE (x) == DImode)
+      if (mode == DImode)
 	*total = 6 * cost2;
       else
 	*total = cost2;
@@ -2881,7 +2887,7 @@ bfin_rtx_costs (rtx x, int code_i, int outer_code_i, int opno, int *total,
     case ASHIFT: 
     case ASHIFTRT:
     case LSHIFTRT:
-      if (GET_MODE (x) == DImode)
+      if (mode == DImode)
 	*total = 6 * cost2;
       else
 	*total = cost2;
@@ -2890,7 +2896,7 @@ bfin_rtx_costs (rtx x, int code_i, int outer_code_i, int opno, int *total,
       op1 = XEXP (x, 1);
       if (GET_CODE (op0) != REG
 	  && (GET_CODE (op0) != SUBREG || GET_CODE (SUBREG_REG (op0)) != REG))
-	*total += rtx_cost (op0, code, 0, speed);
+	*total += rtx_cost (op0, mode, code, 0, speed);
 
       return true;
 	  
@@ -2915,26 +2921,26 @@ bfin_rtx_costs (rtx x, int code_i, int outer_code_i, int opno, int *total,
 
       if (GET_CODE (op0) != REG
 	  && (GET_CODE (op0) != SUBREG || GET_CODE (SUBREG_REG (op0)) != REG))
-	*total += rtx_cost (op0, code, 0, speed);
+	*total += rtx_cost (op0, mode, code, 0, speed);
 
-      if (GET_MODE (x) == DImode)
+      if (mode == DImode)
 	{
 	  *total = 2 * cost2;
 	  return true;
 	}
       *total = cost2;
-      if (GET_MODE (x) != SImode)
+      if (mode != SImode)
 	return true;
 
       if (code == AND)
 	{
 	  if (! rhs_andsi3_operand (XEXP (x, 1), SImode))
-	    *total += rtx_cost (XEXP (x, 1), code, 1, speed);
+	    *total += rtx_cost (XEXP (x, 1), mode, code, 1, speed);
 	}
       else
 	{
 	  if (! regorlog2_operand (XEXP (x, 1), SImode))
-	    *total += rtx_cost (XEXP (x, 1), code, 1, speed);
+	    *total += rtx_cost (XEXP (x, 1), mode, code, 1, speed);
 	}
 
       return true;
@@ -2974,10 +2980,10 @@ bfin_rtx_costs (rtx x, int code_i, int outer_code_i, int opno, int *total,
 
 	  if (GET_CODE (op0) != REG
 	      && (GET_CODE (op0) != SUBREG || GET_CODE (SUBREG_REG (op0)) != REG))
-	    *total += rtx_cost (op0, MULT, 0, speed);
+	    *total += rtx_cost (op0, mode, MULT, 0, speed);
 	  if (GET_CODE (op1) != REG
 	      && (GET_CODE (op1) != SUBREG || GET_CODE (SUBREG_REG (op1)) != REG))
-	    *total += rtx_cost (op1, MULT, 1, speed);
+	    *total += rtx_cost (op1, mode, MULT, 1, speed);
 	}
       return true;
 
@@ -3184,7 +3190,7 @@ output_pop_multiple (rtx insn, rtx *operands)
 /* Adjust DST and SRC by OFFSET bytes, and generate one move in mode MODE.  */
 
 static void
-single_move_for_movmem (rtx dst, rtx src, enum machine_mode mode, HOST_WIDE_INT offset)
+single_move_for_movmem (rtx dst, rtx src, machine_mode mode, HOST_WIDE_INT offset)
 {
   rtx scratch = gen_reg_rtx (mode);
   rtx srcmem, dstmem;
@@ -3767,7 +3773,9 @@ hwloop_optimize (hwloop_info loop)
 	}
       else
 	{
-	  emit_jump_insn (gen_jump (label));
+	  rtx_insn *ret = emit_jump_insn (gen_jump (label));
+	  JUMP_LABEL (ret) = label;
+	  LABEL_NUSES (label)++;
 	  seq_end = emit_barrier ();
 	}
     }
@@ -3783,8 +3791,19 @@ hwloop_optimize (hwloop_info loop)
 	{
 	  gcc_assert (JUMP_P (prev));
 	  prev = PREV_INSN (prev);
+	  emit_insn_after (seq, prev);
 	}
-      emit_insn_after (seq, prev);
+      else
+	{
+	  emit_insn_after (seq, prev);
+	  BB_END (loop->incoming_src) = prev;
+	  basic_block new_bb = create_basic_block (seq, seq_end,
+						   loop->head->prev_bb);
+	  edge e = loop->incoming->last ();
+	  gcc_assert (e->flags & EDGE_FALLTHRU);
+	  redirect_edge_succ (e, new_bb);
+	  make_edge (new_bb, loop->head, 0);
+	}
     }
   else
     {
@@ -3822,7 +3841,8 @@ hwloop_optimize (hwloop_info loop)
 
   delete_insn (loop->loop_end);
   /* Insert the loop end label before the last instruction of the loop.  */
-  emit_label_before (loop->end_label, loop->last_insn);
+  emit_label_before (as_a <rtx_code_label *> (loop->end_label),
+		     loop->last_insn);
 
   return true;
 }
@@ -3859,7 +3879,7 @@ hwloop_fail (hwloop_info loop)
   else
     {
       splitting_loops = 1;  
-      try_split (PATTERN (insn), insn, 1);
+      try_split (PATTERN (insn), safe_as_a <rtx_insn *> (insn), 1);
       splitting_loops = 0;
     }
 }
@@ -4495,7 +4515,7 @@ workaround_speculation (void)
 
 		  if (delay_needed > cycles_since_jump)
 		    {
-		      rtx prev = prev_real_insn (label);
+		      rtx_insn *prev = prev_real_insn (label);
 		      delay_needed -= cycles_since_jump;
 		      if (dump_file)
 			fprintf (dump_file, "Adding %d nops after %d\n",
@@ -4561,7 +4581,7 @@ add_sched_insns_for_speculation (void)
 	  if (any_condjump_p (insn)
 	      && !cbranch_predicted_taken_p (insn))
 	    {
-	      rtx n = next_real_insn (insn);
+	      rtx_insn *n = next_real_insn (insn);
 	      emit_insn_before (gen_stall (GEN_INT (3)), n);
 	    }
 	}
@@ -5336,7 +5356,7 @@ static const struct builtin_description bdesc_1arg[] =
    where we expect a vector.  To avoid crashing, use one of the vector
    clear instructions.  */
 static rtx
-safe_vector_operand (rtx x, enum machine_mode mode)
+safe_vector_operand (rtx x, machine_mode mode)
 {
   if (x != const0_rtx)
     return x;
@@ -5358,11 +5378,11 @@ bfin_expand_binop_builtin (enum insn_code icode, tree exp, rtx target,
   tree arg1 = CALL_EXPR_ARG (exp, 1);
   rtx op0 = expand_normal (arg0);
   rtx op1 = expand_normal (arg1);
-  enum machine_mode op0mode = GET_MODE (op0);
-  enum machine_mode op1mode = GET_MODE (op1);
-  enum machine_mode tmode = insn_data[icode].operand[0].mode;
-  enum machine_mode mode0 = insn_data[icode].operand[1].mode;
-  enum machine_mode mode1 = insn_data[icode].operand[2].mode;
+  machine_mode op0mode = GET_MODE (op0);
+  machine_mode op1mode = GET_MODE (op1);
+  machine_mode tmode = insn_data[icode].operand[0].mode;
+  machine_mode mode0 = insn_data[icode].operand[1].mode;
+  machine_mode mode1 = insn_data[icode].operand[2].mode;
 
   if (VECTOR_MODE_P (mode0))
     op0 = safe_vector_operand (op0, mode0);
@@ -5414,9 +5434,9 @@ bfin_expand_unop_builtin (enum insn_code icode, tree exp,
   rtx pat;
   tree arg0 = CALL_EXPR_ARG (exp, 0);
   rtx op0 = expand_normal (arg0);
-  enum machine_mode op0mode = GET_MODE (op0);
-  enum machine_mode tmode = insn_data[icode].operand[0].mode;
-  enum machine_mode mode0 = insn_data[icode].operand[1].mode;
+  machine_mode op0mode = GET_MODE (op0);
+  machine_mode tmode = insn_data[icode].operand[0].mode;
+  machine_mode mode0 = insn_data[icode].operand[1].mode;
 
   if (! target
       || GET_MODE (target) != tmode
@@ -5452,7 +5472,7 @@ bfin_expand_unop_builtin (enum insn_code icode, tree exp,
 static rtx
 bfin_expand_builtin (tree exp, rtx target ATTRIBUTE_UNUSED,
 		     rtx subtarget ATTRIBUTE_UNUSED,
-		     enum machine_mode mode ATTRIBUTE_UNUSED,
+		     machine_mode mode ATTRIBUTE_UNUSED,
 		     int ignore ATTRIBUTE_UNUSED)
 {
   size_t i;
@@ -5462,7 +5482,7 @@ bfin_expand_builtin (tree exp, rtx target ATTRIBUTE_UNUSED,
   unsigned int fcode = DECL_FUNCTION_CODE (fndecl);
   tree arg0, arg1, arg2;
   rtx op0, op1, op2, accvec, pat, tmp1, tmp2, a0reg, a1reg;
-  enum machine_mode tmode, mode0;
+  machine_mode tmode, mode0;
 
   switch (fcode)
     {

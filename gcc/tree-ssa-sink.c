@@ -1,5 +1,5 @@
 /* Code sinking for trees
-   Copyright (C) 2001-2014 Free Software Foundation, Inc.
+   Copyright (C) 2001-2015 Free Software Foundation, Inc.
    Contributed by Daniel Berlin <dan@dberlin.org>
 
 This file is part of GCC.
@@ -21,23 +21,21 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stor-layout.h"
-#include "basic-block.h"
+#include "cfganal.h"
 #include "gimple-pretty-print.h"
 #include "tree-inline.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "hashtab.h"
 #include "tree-iterator.h"
 #include "alloc-pool.h"
 #include "tree-pass.h"
@@ -85,7 +83,7 @@ static struct
    we return NULL.  */
 
 static basic_block
-find_bb_for_arg (gimple phi, tree def)
+find_bb_for_arg (gphi *phi, tree def)
 {
   size_t i;
   bool foundone = false;
@@ -149,11 +147,11 @@ nearest_common_dominator_of_uses (def_operand_p def_p, bool *debug_stmts)
       gimple usestmt = USE_STMT (use_p);
       basic_block useblock;
 
-      if (gimple_code (usestmt) == GIMPLE_PHI)
+      if (gphi *phi = dyn_cast <gphi *> (usestmt))
 	{
 	  int idx = PHI_ARG_INDEX_FROM_USE (use_p);
 
-	  useblock = gimple_phi_arg_edge (usestmt, idx)->src;
+	  useblock = gimple_phi_arg_edge (phi, idx)->src;
 	}
       else if (is_gimple_debug (usestmt))
 	{
@@ -446,7 +444,7 @@ statement_sink_location (gimple stmt, basic_block frombb,
 	}
     }
 
-  sinkbb = find_bb_for_arg (use, DEF_FROM_PTR (def_p));
+  sinkbb = find_bb_for_arg (as_a <gphi *> (use), DEF_FROM_PTR (def_p));
 
   /* This can happen if there are multiple uses in a PHI.  */
   if (!sinkbb)

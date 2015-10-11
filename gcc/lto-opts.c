@@ -1,6 +1,6 @@
 /* LTO IL options.
 
-   Copyright (C) 2009-2014 Free Software Foundation, Inc.
+   Copyright (C) 2009-2015 Free Software Foundation, Inc.
    Contributed by Simon Baldwin <simonb@google.com>
 
 This file is part of GCC.
@@ -22,21 +22,23 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "alias.h"
+#include "backend.h"
 #include "tree.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
 #include "gimple.h"
-#include "hashtab.h"
-#include "bitmap.h"
+#include "hard-reg-set.h"
+#include "options.h"
+#include "fold-const.h"
+#include "internal-fn.h"
 #include "flags.h"
 #include "opts.h"
 #include "options.h"
 #include "common/common-target.h"
 #include "diagnostic.h"
+#include "cgraph.h"
+#include "target.h"
 #include "lto-streamer.h"
+#include "lto-section-names.h"
 #include "toplev.h"
 
 /* Append the option piece OPT to the COLLECT_GCC_OPTIONS string
@@ -146,6 +148,31 @@ lto_write_options (void)
     append_to_collect_gcc_options (&temporary_obstack, &first_p,
 			       "-fno-strict-overflow");
 
+  if (!global_options_set.x_flag_openmp
+      && !global_options.x_flag_openmp)
+    append_to_collect_gcc_options (&temporary_obstack, &first_p, "-fno-openmp");
+  if (!global_options_set.x_flag_openacc
+      && !global_options.x_flag_openacc)
+    append_to_collect_gcc_options (&temporary_obstack, &first_p,
+				   "-fno-openacc");
+
+  /* Append options from target hook and store them to offload_lto section.  */
+  if (lto_stream_offload_p)
+    {
+      char *offload_opts = targetm.offload_options ();
+      char *offload_ptr = offload_opts;
+      while (offload_ptr)
+       {
+	 char *next = strchr (offload_ptr, ' ');
+	 if (next)
+	   *next++ = '\0';
+	 append_to_collect_gcc_options (&temporary_obstack, &first_p,
+					offload_ptr);
+	 offload_ptr = next;
+       }
+      free (offload_opts);
+    }
+
   /* Output explicitly passed options.  */
   for (i = 1; i < save_decoded_options_count; ++i)
     {
@@ -169,15 +196,22 @@ lto_write_options (void)
       if (!(cl_options[option->opt_index].flags & (CL_COMMON|CL_TARGET|CL_LTO)))
 	continue;
 
+      /* Do not store target-specific options in offload_lto section.  */
+      if ((cl_options[option->opt_index].flags & CL_TARGET)
+	  && lto_stream_offload_p)
+       continue;
+
       /* Drop options created from the gcc driver that will be rejected
 	 when passed on to the driver again.  */
       if (cl_options[option->opt_index].cl_reject_driver)
 	continue;
 
       /* Also drop all options that are handled by the driver as well,
-         which includes things like -o and -v or -fhelp for example.
-	 We do not need those.  Also drop all diagnostic options.  */
-      if (cl_options[option->opt_index].flags & (CL_DRIVER|CL_WARNING))
+	 which includes things like -o and -v or -fhelp for example.
+	 We do not need those.  The only exception is -foffload option, if we
+	 write it in offload_lto section.  Also drop all diagnostic options.  */
+      if ((cl_options[option->opt_index].flags & (CL_DRIVER|CL_WARNING))
+	  && (!lto_stream_offload_p || option->opt_index != OPT_foffload_))
 	continue;
 
       for (j = 0; j < option->canonical_option_num_elements; ++j)

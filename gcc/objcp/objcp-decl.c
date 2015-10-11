@@ -1,6 +1,6 @@
 /* Process the ObjC-specific declarations and variables for 
    the Objective-C++ compiler.
-   Copyright (C) 2005-2014 Free Software Foundation, Inc.
+   Copyright (C) 2005-2015 Free Software Foundation, Inc.
    Contributed by Ziemowit Laski  <zlaski@apple.com>
 
 This file is part of GCC.
@@ -23,9 +23,12 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "vec.h"
+#include "alias.h"
 #include "tree.h"
+#include "options.h"
+#include "inchash.h"
 #include "cp-tree.h"
-#include "hashtab.h"
 
 #include "c-family/c-objc.h"
 #include "objc-act.h"

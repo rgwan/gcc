@@ -1,5 +1,5 @@
 /* Alias analysis for trees.
-   Copyright (C) 2004-2014 Free Software Foundation, Inc.
+   Copyright (C) 2004-2015 Free Software Foundation, Inc.
    Contributed by Diego Novillo <dnovillo@redhat.com>
 
 This file is part of GCC.
@@ -21,38 +21,38 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
 #include "tree.h"
+#include "gimple.h"
+#include "rtl.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "tm_p.h"
 #include "target.h"
-#include "basic-block.h"
+
+#include "dominance.h"
 #include "timevar.h"	/* for TV_ALIAS_STMT_WALK */
 #include "langhooks.h"
 #include "flags.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
 #include "tree-pretty-print.h"
 #include "dumpfile.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
 #include "tree-eh.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
-#include "gimple-ssa.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
 #include "tree-dfa.h"
 #include "tree-inline.h"
 #include "params.h"
 #include "alloc-pool.h"
-#include "tree-ssa-alias.h"
+#include "cgraph.h"
 #include "ipa-reference.h"
 
 /* Broad overview of how alias analysis on gimple works:
@@ -138,6 +138,7 @@ dump_alias_stats (FILE *s)
 	   alias_stats.call_may_clobber_ref_p_no_alias,
 	   alias_stats.call_may_clobber_ref_p_no_alias
 	   + alias_stats.call_may_clobber_ref_p_may_alias);
+  dump_alias_stats_in_alias_c (s);
 }
 
 
@@ -940,11 +941,7 @@ nonoverlapping_component_refs_p (const_tree x, const_tree y)
   if (fieldsx.length () == 2)
     {
       if (ncr_compar (&fieldsx[0], &fieldsx[1]) == 1)
-	{
-	  const_tree tem = fieldsx[0];
-	  fieldsx[0] = fieldsx[1];
-	  fieldsx[1] = tem;
-	}
+	std::swap (fieldsx[0], fieldsx[1]);
     }
   else
     fieldsx.qsort (ncr_compar);
@@ -952,11 +949,7 @@ nonoverlapping_component_refs_p (const_tree x, const_tree y)
   if (fieldsy.length () == 2)
     {
       if (ncr_compar (&fieldsy[0], &fieldsy[1]) == 1)
-	{
-	  const_tree tem = fieldsy[0];
-	  fieldsy[0] = fieldsy[1];
-	  fieldsy[1] = tem;
-	}
+	std::swap (fieldsy[0], fieldsy[1]);
     }
   else
     fieldsy.qsort (ncr_compar);
@@ -1377,6 +1370,34 @@ refs_may_alias_p_1 (ao_ref *ref1, ao_ref *ref2, bool tbaa_p)
     return decl_refs_may_alias_p (ref1->ref, base1, offset1, max_size1,
 				  ref2->ref, base2, offset2, max_size2);
 
+  /* Handle restrict based accesses.
+     ???  ao_ref_base strips inner MEM_REF [&decl], recover from that
+     here.  */
+  tree rbase1 = base1;
+  tree rbase2 = base2;
+  if (var1_p)
+    {
+      rbase1 = ref1->ref;
+      if (rbase1)
+	while (handled_component_p (rbase1))
+	  rbase1 = TREE_OPERAND (rbase1, 0);
+    }
+  if (var2_p)
+    {
+      rbase2 = ref2->ref;
+      if (rbase2)
+	while (handled_component_p (rbase2))
+	  rbase2 = TREE_OPERAND (rbase2, 0);
+    }
+  if (rbase1 && rbase2
+      && (TREE_CODE (base1) == MEM_REF || TREE_CODE (base1) == TARGET_MEM_REF)
+      && (TREE_CODE (base2) == MEM_REF || TREE_CODE (base2) == TARGET_MEM_REF)
+      /* If the accesses are in the same restrict clique... */
+      && MR_DEPENDENCE_CLIQUE (base1) == MR_DEPENDENCE_CLIQUE (base2)
+      /* But based on different pointers they do not alias.  */
+      && MR_DEPENDENCE_BASE (base1) != MR_DEPENDENCE_BASE (base2))
+    return false;
+
   ind1_p = (TREE_CODE (base1) == MEM_REF
 	    || TREE_CODE (base1) == TARGET_MEM_REF);
   ind2_p = (TREE_CODE (base2) == MEM_REF
@@ -1385,13 +1406,10 @@ refs_may_alias_p_1 (ao_ref *ref1, ao_ref *ref2, bool tbaa_p)
   /* Canonicalize the pointer-vs-decl case.  */
   if (ind1_p && var2_p)
     {
-      HOST_WIDE_INT tmp1;
-      tree tmp2;
-      ao_ref *tmp3;
-      tmp1 = offset1; offset1 = offset2; offset2 = tmp1;
-      tmp1 = max_size1; max_size1 = max_size2; max_size2 = tmp1;
-      tmp2 = base1; base1 = base2; base2 = tmp2;
-      tmp3 = ref1; ref1 = ref2; ref2 = tmp3;
+      std::swap (offset1, offset2);
+      std::swap (max_size1, max_size2);
+      std::swap (base1, base2);
+      std::swap (ref1, ref2);
       var1_p = true;
       ind1_p = false;
       var2_p = false;
@@ -1483,7 +1501,7 @@ refs_output_dependent_p (tree store1, tree store2)
    otherwise return false.  */
 
 static bool
-ref_maybe_used_by_call_p_1 (gimple call, ao_ref *ref)
+ref_maybe_used_by_call_p_1 (gcall *call, ao_ref *ref)
 {
   tree base, callee;
   unsigned i;
@@ -1517,7 +1535,7 @@ ref_maybe_used_by_call_p_1 (gimple call, ao_ref *ref)
      escape points.  See tree-ssa-structalias.c:find_func_aliases
      for the list of builtins we might need to handle here.  */
   if (callee != NULL_TREE
-      && DECL_BUILT_IN_CLASS (callee) == BUILT_IN_NORMAL)
+      && gimple_call_builtin_p (call, BUILT_IN_NORMAL))
     switch (DECL_FUNCTION_CODE (callee))
       {
 	/* All the following functions read memory pointed to by
@@ -1796,7 +1814,7 @@ process_args:
 }
 
 static bool
-ref_maybe_used_by_call_p (gimple call, ao_ref *ref)
+ref_maybe_used_by_call_p (gcall *call, ao_ref *ref)
 {
   bool res;
   res = ref_maybe_used_by_call_p_1 (call, ref);
@@ -1831,10 +1849,10 @@ ref_maybe_used_by_stmt_p (gimple stmt, ao_ref *ref)
       return refs_may_alias_p (rhs, ref);
     }
   else if (is_gimple_call (stmt))
-    return ref_maybe_used_by_call_p (stmt, ref);
-  else if (gimple_code (stmt) == GIMPLE_RETURN)
+    return ref_maybe_used_by_call_p (as_a <gcall *> (stmt), ref);
+  else if (greturn *return_stmt = dyn_cast <greturn *> (stmt))
     {
-      tree retval = gimple_return_retval (stmt);
+      tree retval = gimple_return_retval (return_stmt);
       if (retval
 	  && TREE_CODE (retval) != SSA_NAME
 	  && !is_gimple_min_invariant (retval)
@@ -1867,7 +1885,7 @@ ref_maybe_used_by_stmt_p (gimple stmt, tree ref)
    return true, otherwise return false.  */
 
 bool
-call_may_clobber_ref_p_1 (gimple call, ao_ref *ref)
+call_may_clobber_ref_p_1 (gcall *call, ao_ref *ref)
 {
   tree base;
   tree callee;
@@ -1876,6 +1894,22 @@ call_may_clobber_ref_p_1 (gimple call, ao_ref *ref)
   if (gimple_call_flags (call)
       & (ECF_PURE|ECF_CONST|ECF_LOOPING_CONST_OR_PURE|ECF_NOVOPS))
     return false;
+  if (gimple_call_internal_p (call))
+    switch (gimple_call_internal_fn (call))
+      {
+	/* Treat these internal calls like ECF_PURE for aliasing,
+	   they don't write to any memory the program should care about.
+	   They have important other side-effects, and read memory,
+	   so can't be ECF_NOVOPS.  */
+      case IFN_UBSAN_NULL:
+      case IFN_UBSAN_BOUNDS:
+      case IFN_UBSAN_VPTR:
+      case IFN_UBSAN_OBJECT_SIZE:
+      case IFN_ASAN_CHECK:
+	return false;
+      default:
+	break;
+      }
 
   base = ao_ref_base (ref);
   if (!base)
@@ -1907,7 +1941,7 @@ call_may_clobber_ref_p_1 (gimple call, ao_ref *ref)
      escape points.  See tree-ssa-structalias.c:find_func_aliases
      for the list of builtins we might need to handle here.  */
   if (callee != NULL_TREE
-      && DECL_BUILT_IN_CLASS (callee) == BUILT_IN_NORMAL)
+      && gimple_call_builtin_p (call, BUILT_IN_NORMAL))
     switch (DECL_FUNCTION_CODE (callee))
       {
 	/* All the following functions clobber memory pointed to by
@@ -2140,7 +2174,7 @@ call_may_clobber_ref_p_1 (gimple call, ao_ref *ref)
    return true, otherwise return false.  */
 
 bool
-call_may_clobber_ref_p (gimple call, tree ref)
+call_may_clobber_ref_p (gcall *call, tree ref)
 {
   bool res;
   ao_ref r;
@@ -2172,7 +2206,7 @@ stmt_may_clobber_ref_p_1 (gimple stmt, ao_ref *ref)
 	    return true;
 	}
 
-      return call_may_clobber_ref_p_1 (stmt, ref);
+      return call_may_clobber_ref_p_1 (as_a <gcall *> (stmt), ref);
     }
   else if (gimple_assign_single_p (stmt))
     {
@@ -2307,7 +2341,7 @@ stmt_kills_ref_p (gimple stmt, ao_ref *ref)
     {
       tree callee = gimple_call_fndecl (stmt);
       if (callee != NULL_TREE
-	  && DECL_BUILT_IN_CLASS (callee) == BUILT_IN_NORMAL)
+	  && gimple_call_builtin_p (stmt, BUILT_IN_NORMAL))
 	switch (DECL_FUNCTION_CODE (callee))
 	  {
 	  case BUILT_IN_FREE:
@@ -2597,12 +2631,18 @@ get_continuation_for_phi (gimple phi, ao_ref *ref,
    If TRANSLATE returns NULL the walk continues and TRANSLATE is supposed
    to adjust REF and *DATA to make that valid.
 
+   VALUEIZE if non-NULL is called with the next VUSE that is considered
+   and return value is substituted for that.  This can be used to
+   implement optimistic value-numbering for example.  Note that the
+   VUSE argument is assumed to be valueized already.
+
    TODO: Cache the vector of equivalent vuses per ref, vuse pair.  */
 
 void *
 walk_non_aliased_vuses (ao_ref *ref, tree vuse,
 			void *(*walker)(ao_ref *, tree, unsigned int, void *),
 			void *(*translate)(ao_ref *, tree, void *, bool),
+			tree (*valueize)(tree),
 			void *data)
 {
   bitmap visited = NULL;
@@ -2628,6 +2668,8 @@ walk_non_aliased_vuses (ao_ref *ref, tree vuse,
       else if (res != NULL)
 	break;
 
+      if (valueize)
+	vuse = valueize (vuse);
       def_stmt = SSA_NAME_DEF_STMT (vuse);
       if (gimple_nop_p (def_stmt))
 	break;

@@ -1,6 +1,6 @@
 /* Code to analyze doloop loops in order for targets to perform late
    optimizations converting doloops to other forms of hardware loops.
-   Copyright (C) 2011-2014 Free Software Foundation, Inc.
+   Copyright (C) 2011-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,22 +21,29 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "tree.h"
 #include "rtl.h"
-#include "flags.h"
-#include "expr.h"
-#include "hard-reg-set.h"
-#include "regs.h"
-#include "basic-block.h"
-#include "tm_p.h"
 #include "df.h"
+#include "flags.h"
+#include "alias.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
+#include "expr.h"
+#include "regs.h"
+#include "cfgrtl.h"
+#include "tm_p.h"
 #include "cfgloop.h"
 #include "recog.h"
 #include "target.h"
 #include "hw-doloop.h"
 #include "dumpfile.h"
-
-#ifdef HAVE_doloop_end
 
 /* Dump information collected in LOOPS.  */
 static void
@@ -669,4 +676,3 @@ reorg_loops (bool do_reorder, struct hw_doloop_hooks *hooks)
   if (dump_file)
     print_rtl (dump_file, get_insns ());
 }
-#endif

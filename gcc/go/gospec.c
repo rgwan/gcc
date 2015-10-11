@@ -1,5 +1,5 @@
 /* gospec.c -- Specific flags and argument handling of the gcc Go front end.
-   Copyright (C) 2009-2014 Free Software Foundation, Inc.
+   Copyright (C) 2009-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -386,7 +386,7 @@ lang_specific_driver (struct cl_decoded_option **in_decoded_options,
      relative ordering of -lpthread and -lgcc, we can't just mark
      __real_pthread_create in libgcc as non-weak.  But we need to link in
      pthread_create from pthread if we are statically linking, so we work-
-     around by passing -u pthread_create to to the linker. */
+     around by passing -u pthread_create to the linker. */
   if (static_link)
     {
       generate_option (OPT_Wl_, "-u,pthread_create", 1, CL_DRIVER,

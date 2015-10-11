@@ -1,6 +1,6 @@
 // Deque implementation -*- C++ -*-
 
-// Copyright (C) 2001-2014 Free Software Foundation, Inc.
+// Copyright (C) 2001-2015 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -502,25 +502,21 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       { /* Caller must initialize map. */ }
 
 #if __cplusplus >= 201103L
-      _Deque_base(_Deque_base&& __x)
+      _Deque_base(_Deque_base&& __x, false_type)
+      : _M_impl(__x._M_move_impl())
+      { }
+
+      _Deque_base(_Deque_base&& __x, true_type)
       : _M_impl(std::move(__x._M_get_Tp_allocator()))
       {
+	_M_initialize_map(0);
 	if (__x._M_impl._M_map)
-	  {
-	    this->_M_impl._M_swap_data(__x._M_impl);
-	    __try
-	      {
-		// Re-initialize __x using its moved-from allocator.
-		__x._M_initialize_map(0);
-	      }
-	    __catch (...)
-	      {
-		this->_M_impl._M_swap_data(__x._M_impl);
-		__x._M_get_Tp_allocator() = std::move(_M_get_Tp_allocator());
-		__throw_exception_again;
-	      }
-	  }
+	  this->_M_impl._M_swap_data(__x._M_impl);
       }
+
+      _Deque_base(_Deque_base&& __x)
+      : _Deque_base(std::move(__x), typename _Alloc_traits::is_always_equal{})
+      { }
 
       _Deque_base(_Deque_base&& __x, const allocator_type& __a, size_type __n)
       : _M_impl(__a)
@@ -567,18 +563,21 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	{ }
 
 #if __cplusplus >= 201103L
-	_Deque_impl(_Tp_alloc_type&& __a) _GLIBCXX_NOEXCEPT
+	_Deque_impl(_Deque_impl&&) = default;
+
+	_Deque_impl(_Tp_alloc_type&& __a) noexcept
 	: _Tp_alloc_type(std::move(__a)), _M_map(), _M_map_size(0),
 	  _M_start(), _M_finish()
 	{ }
 #endif
 
-	void _M_swap_data(_Deque_impl& __x)
+	void _M_swap_data(_Deque_impl& __x) _GLIBCXX_NOEXCEPT
 	{
-	  std::swap(this->_M_start, __x._M_start);
-	  std::swap(this->_M_finish, __x._M_finish);
-	  std::swap(this->_M_map, __x._M_map);
-	  std::swap(this->_M_map_size, __x._M_map_size);
+	  using std::swap;
+	  swap(this->_M_start, __x._M_start);
+	  swap(this->_M_finish, __x._M_finish);
+	  swap(this->_M_map, __x._M_map);
+	  swap(this->_M_map_size, __x._M_map_size);
 	}
       };
 
@@ -630,6 +629,28 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       enum { _S_initial_map_size = 8 };
 
       _Deque_impl _M_impl;
+
+#if __cplusplus >= 201103L
+    private:
+      _Deque_impl
+      _M_move_impl()
+      {
+	if (!_M_impl._M_map)
+	  return std::move(_M_impl);
+
+	// Create a copy of the current allocator.
+	_Tp_alloc_type __alloc{_M_get_Tp_allocator()};
+	// Put that copy in a moved-from state.
+	_Tp_alloc_type __sink __attribute((__unused__)) {std::move(__alloc)};
+	// Create an empty map that allocates using the moved-from allocator.
+	_Deque_base __empty{__alloc};
+	// Now safe to modify current allocator and perform non-throwing swaps.
+	_Deque_impl __ret{std::move(_M_get_Tp_allocator())};
+	_M_impl._M_swap_data(__ret);
+	_M_impl._M_swap_data(__empty._M_impl);
+	return __ret;
+      }
+#endif
     };
 
   template<typename _Tp, typename _Alloc>
@@ -808,7 +829,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
     {
       // concept requirements
       typedef typename _Alloc::value_type        _Alloc_value_type;
+#if __cplusplus < 201103L
       __glibcxx_class_requires(_Tp, _SGIAssignableConcept)
+#endif
       __glibcxx_class_requires2(_Tp, _Alloc_value_type, _SameTypeConcept)
 
       typedef _Deque_base<_Tp, _Alloc>			_Base;
@@ -1037,9 +1060,8 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       deque&
       operator=(deque&& __x) noexcept(_Alloc_traits::_S_always_equal())
       {
-	constexpr bool __always_equal = _Alloc_traits::_S_always_equal();
-	_M_move_assign1(std::move(__x),
-		        integral_constant<bool, __always_equal>());
+	using __always_equal = typename _Alloc_traits::is_always_equal;
+	_M_move_assign1(std::move(__x), __always_equal{});
 	return *this;
       }
 
@@ -1757,10 +1779,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
        *  std::swap(d1,d2) will feed to this function.
        */
       void
-      swap(deque& __x)
-#if __cplusplus >= 201103L
-      noexcept(_Alloc_traits::_S_nothrow_swap())
-#endif
+      swap(deque& __x) _GLIBCXX_NOEXCEPT
       {
 	_M_impl._M_swap_data(__x._M_impl);
 	_Alloc_traits::_S_on_swap(_M_get_Tp_allocator(),
@@ -2118,13 +2137,15 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	std::__alloc_on_move(_M_get_Tp_allocator(), __x._M_get_Tp_allocator());
       }
 
+      // When the allocators are not equal the operation could throw, because
+      // we might need to allocate a new map for __x after moving from it
+      // or we might need to allocate new elements for *this.
       void
       _M_move_assign1(deque&& __x, /* always equal: */ false_type)
       {
 	constexpr bool __move_storage =
 	  _Alloc_traits::_S_propagate_on_move_assign();
-	_M_move_assign2(std::move(__x),
-			integral_constant<bool, __move_storage>());
+	_M_move_assign2(std::move(__x), __bool_constant<__move_storage>());
       }
 
       // Destroy all elements and deallocate all memory, then replace
@@ -2249,6 +2270,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
   template<typename _Tp, typename _Alloc>
     inline void
     swap(deque<_Tp,_Alloc>& __x, deque<_Tp,_Alloc>& __y)
+    _GLIBCXX_NOEXCEPT_IF(noexcept(__x.swap(__y)))
     { __x.swap(__y); }
 
 #undef _GLIBCXX_DEQUE_BUF_SIZE

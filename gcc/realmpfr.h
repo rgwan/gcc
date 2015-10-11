@@ -1,6 +1,6 @@
 /* Definitions of floating-point conversion from compiler
    internal format to MPFR.
-   Copyright (C) 2010-2014 Free Software Foundation, Inc.
+   Copyright (C) 2010-2015 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -23,7 +23,6 @@
 
 #include <mpfr.h>
 #include <mpc.h>
-#include "real.h"
 
 /* Convert between MPFR and REAL_VALUE_TYPE.  The caller is
    responsible for initializing and clearing the MPFR parameter.  */

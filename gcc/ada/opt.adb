@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2014, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2015, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -171,6 +171,7 @@ package body Opt is
 
          Ada_Version                 := Ada_Version_Runtime;
          Ada_Version_Pragma          := Empty;
+         Default_SSO                 := ' ';
          Dynamic_Elaboration_Checks  := False;
          Extensions_Allowed          := True;
          External_Name_Exp_Casing    := As_Is;
@@ -186,19 +187,23 @@ package body Opt is
          --  we do not expect to get any warnings from compiling such a unit.
 
          --  For an internal unit, assertions/debug pragmas are off unless this
-         --  is the main unit and they were explicitly enabled. We also make
-         --  sure we do not assume that values are necessarily valid and that
-         --  SPARK_Mode is set to its configuration value.
+         --  is the main unit and they were explicitly enabled, or unless the
+         --  main unit was compiled in GNAT mode. We also make sure we do not
+         --  assume that values are necessarily valid and that SPARK_Mode is
+         --  set to its configuration value.
 
          if Main_Unit then
             Assertions_Enabled       := Assertions_Enabled_Config;
             Assume_No_Invalid_Values := Assume_No_Invalid_Values_Config;
             Check_Policy_List        := Check_Policy_List_Config;
-            Default_SSO              := Default_SSO_Config;
             SPARK_Mode               := SPARK_Mode_Config;
             SPARK_Mode_Pragma        := SPARK_Mode_Pragma_Config;
          else
-            Assertions_Enabled       := False;
+            if GNAT_Mode_Config then
+               Assertions_Enabled    := Assertions_Enabled_Config;
+            else
+               Assertions_Enabled    := False;
+            end if;
             Assume_No_Invalid_Values := False;
             Check_Policy_List        := Empty;
             SPARK_Mode               := None;

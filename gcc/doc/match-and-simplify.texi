@@ -1,4 +1,4 @@
-@c Copyright (C) 2014 Free Software Foundation, Inc.
+@c Copyright (C) 2014-2015 Free Software Foundation, Inc.
 @c Free Software Foundation, Inc.
 @c This is part of the GCC manual.
 @c For copying conditions, see the file gcc.texi.
@@ -39,7 +39,7 @@ APIs are introduced.
 @deftypefnx {GIMPLE function} tree gimple_simplify (enum tree_code, tree, tree, tree, tree, gimple_seq *, tree (*)(tree))
 @deftypefnx {GIMPLE function} tree gimple_simplify (enum built_in_function, tree, tree, gimple_seq *, tree (*)(tree))
 @deftypefnx {GIMPLE function} tree gimple_simplify (enum built_in_function, tree, tree, tree, gimple_seq *, tree (*)(tree))
-@deftypefnx {GIMPLE function} tree gimple_simplify (enum built_in_function, tree, tree, tree, gimple_seq *, tree (*)(tree))
+@deftypefnx {GIMPLE function} tree gimple_simplify (enum built_in_function, tree, tree, tree, tree, gimple_seq *, tree (*)(tree))
 The main GIMPLE API entry to the expression simplifications mimicing
 that of the GENERIC fold_@{unary,binary,ternary@} functions.
 @end deftypefn
@@ -64,6 +64,7 @@ Ontop of these a @code{fold_buildN}-like API for GIMPLE is introduced:
 @deftypefnx {GIMPLE function} tree gimple_build (gimple_seq *, location_t, enum tree_code, tree, tree, tree, tree, tree (*valueize) (tree) = NULL);
 @deftypefnx {GIMPLE function} tree gimple_build (gimple_seq *, location_t, enum built_in_function, tree, tree, tree (*valueize) (tree) = NULL);
 @deftypefnx {GIMPLE function} tree gimple_build (gimple_seq *, location_t, enum built_in_function, tree, tree, tree, tree (*valueize) (tree) = NULL);
+@deftypefnx {GIMPLE function} tree gimple_build (gimple_seq *, location_t, enum built_in_function, tree, tree, tree, tree, tree (*valueize) (tree) = NULL);
 @deftypefnx {GIMPLE function} tree gimple_convert (gimple_seq *, location_t, tree, tree);
 @end deftypefn
 
@@ -223,6 +224,46 @@ In this example the pattern will be repeated four times with
 @code{opa, opb, opc} being @code{plus, minus, plus},
 @code{plus, minus, minus}, @code{minus, plus, plus},
 @code{minus, plus, minus}.
+
+To avoid repeating operator lists in @code{for} you can name
+them via
+
+@smallexample
+(define_operator_list pmm plus minus mult)
+@end smallexample
+
+and use them in @code{for} operator lists where they get expanded.
+
+@smallexample
+(for opa (pmm trunc_div)
+ (simplify...
+@end smallexample
+
+So this example iterates over @code{plus}, @code{minus}, @code{mult}
+and @code{trunc_div}.
+
+Using operator lists can also remove the need to explicitely write
+a @code{for}.  All operator list uses that appear in a @code{simplify}
+or @code{match} pattern in operator positions will implicitely
+be added to a new @code{for}.  For example
+
+@smallexample
+(define_operator_list SQRT BUILT_IN_SQRTF BUILT_IN_SQRT BUILT_IN_SQRTL)
+(define_operator_list POW BUILT_IN_POWF BUILT_IN_POW BUILT_IN_POWL)
+(simplify
+ (SQRT (POW @@0 @@1))
+ (POW (abs @@0) (mult @@1 @{ built_real (TREE_TYPE (@@1), dconsthalf); @})))
+@end smallexample
+
+is the same as
+
+@smallexample
+(for SQRT (BUILT_IN_SQRTF BUILT_IN_SQRT BUILT_IN_SQRTL)
+     POW (BUILT_IN_POWF BUILT_IN_POW BUILT_IN_POWL)
+ (simplify
+  (SQRT (POW @@0 @@1))
+  (POW (abs @@0) (mult @@1 @{ built_real (TREE_TYPE (@@1), dconsthalf); @}))))
+@end smallexample
 
 Another building block are @code{with} expressions in the
 result expression which nest the generated code in a new C block

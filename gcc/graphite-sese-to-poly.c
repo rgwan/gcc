@@ -1,5 +1,5 @@
 /* Conversion of SESE regions to Polyhedra.
-   Copyright (C) 2009-2014 Free Software Foundation, Inc.
+   Copyright (C) 2009-2015 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <sebastian.pop@amd.com>.
 
 This file is part of GCC.
@@ -21,64 +21,50 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 
 #ifdef HAVE_isl
+/* Workaround for GMP 5.1.3 bug, see PR56019.  */
+#include <stddef.h>
+
+#include <isl/constraint.h>
 #include <isl/set.h>
 #include <isl/map.h>
 #include <isl/union_map.h>
 #include <isl/constraint.h>
 #include <isl/aff.h>
 #include <isl/val.h>
-/* For C++ linkage of C functions.
-   Missing from  isl/val_gmp.h in isl 0.12 versions.
-   Appearing in isl/val_gmp.h in isl 0.13.
-   To be removed when passing to isl 0.13. */
-#if defined(__cplusplus)
+
+/* Since ISL-0.13, the extern is in val_gmp.h.  */
+#if !defined(HAVE_ISL_SCHED_CONSTRAINTS_COMPUTE_SCHEDULE) && defined(__cplusplus)
 extern "C" {
 #endif
 #include <isl/val_gmp.h>
-#if defined(__cplusplus)
+#if !defined(HAVE_ISL_SCHED_CONSTRAINTS_COMPUTE_SCHEDULE) && defined(__cplusplus)
 }
-#endif
-#ifdef HAVE_cloog
-#include <cloog/cloog.h>
-#include <cloog/cloog.h>
-#include <cloog/isl/domain.h>
-#endif
 #endif
 
 #include "system.h"
 #include "coretypes.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
 #include "gimple.h"
+#include "ssa.h"
+#include "params.h"
+#include "fold-const.h"
 #include "gimple-iterator.h"
 #include "gimplify.h"
 #include "gimplify-me.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-ssa-loop-manip.h"
 #include "tree-ssa-loop-niter.h"
 #include "tree-ssa-loop.h"
 #include "tree-into-ssa.h"
 #include "tree-pass.h"
 #include "cfgloop.h"
-#include "tree-chrec.h"
 #include "tree-data-ref.h"
 #include "tree-scalar-evolution.h"
 #include "domwalk.h"
-#include "sese.h"
-#include "tree-ssa-propagate.h"
-
-#ifdef HAVE_isl
-#include "expr.h"
 #include "graphite-poly.h"
+#include "tree-ssa-propagate.h"
 #include "graphite-sese-to-poly.h"
 
 
@@ -94,7 +80,7 @@ tree_int_to_gmp (tree t, mpz_t res)
    loop.  */
 
 static size_t
-phi_arg_in_outermost_loop (gimple phi)
+phi_arg_in_outermost_loop (gphi *phi)
 {
   loop_p loop = gimple_bb (phi)->loop_father;
   size_t i, res = 0;
@@ -113,13 +99,13 @@ phi_arg_in_outermost_loop (gimple phi)
    PSI by inserting on the loop ENTRY edge assignment "RES = INIT".  */
 
 static void
-remove_simple_copy_phi (gimple_stmt_iterator *psi)
+remove_simple_copy_phi (gphi_iterator *psi)
 {
-  gimple phi = gsi_stmt (*psi);
+  gphi *phi = psi->phi ();
   tree res = gimple_phi_result (phi);
   size_t entry = phi_arg_in_outermost_loop (phi);
   tree init = gimple_phi_arg_def (phi, entry);
-  gimple stmt = gimple_build_assign (res, init);
+  gassign *stmt = gimple_build_assign (res, init);
   edge e = gimple_phi_arg_edge (phi, entry);
 
   remove_phi_node (psi, false);
@@ -130,16 +116,16 @@ remove_simple_copy_phi (gimple_stmt_iterator *psi)
    loop ENTRY edge the assignment RES = INIT.  */
 
 static void
-remove_invariant_phi (sese region, gimple_stmt_iterator *psi)
+remove_invariant_phi (sese region, gphi_iterator *psi)
 {
-  gimple phi = gsi_stmt (*psi);
+  gphi *phi = psi->phi ();
   loop_p loop = loop_containing_stmt (phi);
   tree res = gimple_phi_result (phi);
   tree scev = scalar_evolution_in_region (region, loop, res);
   size_t entry = phi_arg_in_outermost_loop (phi);
   edge e = gimple_phi_arg_edge (phi, entry);
   tree var;
-  gimple stmt;
+  gassign *stmt;
   gimple_seq stmts = NULL;
 
   if (tree_contains_chrecs (scev, NULL))
@@ -158,7 +144,7 @@ remove_invariant_phi (sese region, gimple_stmt_iterator *psi)
 /* Returns true when the phi node at PSI is of the form "a = phi (a, x)".  */
 
 static inline bool
-simple_copy_phi_p (gimple phi)
+simple_copy_phi_p (gphi *phi)
 {
   tree res;
 
@@ -175,10 +161,10 @@ simple_copy_phi_p (gimple phi)
    be considered.  */
 
 static bool
-reduction_phi_p (sese region, gimple_stmt_iterator *psi)
+reduction_phi_p (sese region, gphi_iterator *psi)
 {
   loop_p loop;
-  gimple phi = gsi_stmt (*psi);
+  gphi *phi = psi->phi ();
   tree res = gimple_phi_result (phi);
 
   loop = loop_containing_stmt (phi);
@@ -513,6 +499,7 @@ build_pbb_scattering_polyhedrons (isl_aff *static_sched,
 	      (isl_local_space_from_space (isl_map_get_space (pbb->schedule)));
 
 	  val = isl_aff_get_coefficient_val (static_sched, isl_dim_in, i / 2);
+	  gcc_assert (val && isl_val_is_int (val));
 
 	  val = isl_val_neg (val);
 	  c = isl_constraint_set_constant_val (c, val);
@@ -617,7 +604,7 @@ extract_affine_chrec (scop_p s, tree e, __isl_take isl_space *space)
   isl_pw_aff *lhs = extract_affine (s, CHREC_LEFT (e), isl_space_copy (space));
   isl_pw_aff *rhs = extract_affine (s, CHREC_RIGHT (e), isl_space_copy (space));
   isl_local_space *ls = isl_local_space_from_space (space);
-  unsigned pos = sese_loop_depth ((sese) s->region, get_chrec_loop (e)) - 1;
+  unsigned pos = sese_loop_depth (SCOP_REGION (s), get_chrec_loop (e)) - 1;
   isl_aff *loop = isl_aff_set_coefficient_si
     (isl_aff_zero_on_domain (ls), isl_dim_in, pos, 1);
   isl_pw_aff *l = isl_pw_aff_from_aff (loop);
@@ -735,14 +722,12 @@ extract_affine_int (tree e, __isl_take isl_space *space)
 
 /* Compute pwaff mod 2^width.  */
 
-extern isl_ctx *the_isl_ctx;
-
 static isl_pw_aff *
 wrap (isl_pw_aff *pwaff, unsigned width)
 {
   isl_val *mod;
 
-  mod = isl_val_int_from_ui(the_isl_ctx, width);
+  mod = isl_val_int_from_ui (isl_pw_aff_get_ctx (pwaff), width);
   mod = isl_val_2exp (mod);
   pwaff = isl_pw_aff_mod_val (pwaff, mod);
 
@@ -777,6 +762,10 @@ parameter_index_in_region (tree name, sese region)
   int i;
 
   gcc_assert (TREE_CODE (name) == SSA_NAME);
+
+  /* Cannot constrain on anything else than INTEGER_TYPE parameters.  */
+  if (TREE_CODE (TREE_TYPE (name)) != INTEGER_TYPE)
+    return -1;
 
   i = parameter_index_in_region_1 (name, region);
   if (i != -1)
@@ -903,6 +892,9 @@ scan_tree_for_params (sese s, tree e)
 
     case INTEGER_CST:
     case ADDR_EXPR:
+    case REAL_CST:
+    case COMPLEX_CST:
+    case VECTOR_CST:
       break;
 
    default:
@@ -1021,7 +1013,7 @@ build_loop_iteration_domains (scop_p scop, struct loop *loop,
 	  (isl_local_space_from_space (isl_space_copy (space)));
       c = isl_constraint_set_coefficient_si (c, isl_dim_set, pos, -1);
       tree_int_to_gmp (nb_iters, g);
-      v = isl_val_int_from_gmp (the_isl_ctx, g);
+      v = isl_val_int_from_gmp (scop->ctx, g);
       c = isl_constraint_set_constant_val (c, v);
       inner = isl_set_add_constraint (inner, c);
     }
@@ -1076,7 +1068,7 @@ build_loop_iteration_domains (scop_p scop, struct loop *loop,
 	  c = isl_inequality_alloc
 	      (isl_local_space_from_space (isl_space_copy (space)));
 	  c = isl_constraint_set_coefficient_si (c, isl_dim_set, pos, -1);
-	  v = isl_val_int_from_gmp (the_isl_ctx, g);
+	  v = isl_val_int_from_gmp (scop->ctx, g);
 	  mpz_clear (g);
 	  c = isl_constraint_set_constant_val (c, v);
 	  inner = isl_set_add_constraint (inner, c);
@@ -1122,7 +1114,7 @@ create_pw_aff_from_tree (poly_bb_p pbb, tree t)
    inequalities.  */
 
 static void
-add_condition_to_pbb (poly_bb_p pbb, gimple stmt, enum tree_code code)
+add_condition_to_pbb (poly_bb_p pbb, gcond *stmt, enum tree_code code)
 {
   isl_pw_aff *lhs = create_pw_aff_from_tree (pbb, gimple_cond_lhs (stmt));
   isl_pw_aff *rhs = create_pw_aff_from_tree (pbb, gimple_cond_rhs (stmt));
@@ -1182,13 +1174,18 @@ add_conditions_to_domain (poly_bb_p pbb)
       {
       case GIMPLE_COND:
 	  {
-	    enum tree_code code = gimple_cond_code (stmt);
+            /* Don't constrain on anything else than INTEGER_TYPE.  */
+	    if (TREE_CODE (TREE_TYPE (gimple_cond_lhs (stmt))) != INTEGER_TYPE)
+              break;
+
+	    gcond *cond_stmt = as_a <gcond *> (stmt);
+	    enum tree_code code = gimple_cond_code (cond_stmt);
 
 	    /* The conditions for ELSE-branches are inverted.  */
 	    if (!GBB_CONDITION_CASES (gbb)[i])
 	      code = invert_tree_comparison (code, false);
 
-	    add_condition_to_pbb (pbb, stmt, code);
+	    add_condition_to_pbb (pbb, cond_stmt, code);
 	    break;
 	  }
 
@@ -1218,7 +1215,7 @@ add_conditions_to_constraints (scop_p scop)
    edge between BB and its predecessor is not a loop exit edge, and
    the last statement of the single predecessor is a COND_EXPR.  */
 
-static gimple
+static gcond *
 single_pred_cond_non_loop_exit (basic_block bb)
 {
   if (single_pred_p (bb))
@@ -1233,7 +1230,7 @@ single_pred_cond_non_loop_exit (basic_block bb)
       stmt = last_stmt (pred);
 
       if (stmt && gimple_code (stmt) == GIMPLE_COND)
-	return stmt;
+	return as_a <gcond *> (stmt);
     }
 
   return NULL;
@@ -1264,7 +1261,7 @@ void
 sese_dom_walker::before_dom_children (basic_block bb)
 {
   gimple_bb_p gbb;
-  gimple stmt;
+  gcond *stmt;
 
   if (!bb_in_sese_p (bb, m_region))
     return;
@@ -1339,7 +1336,7 @@ add_param_constraints (scop_p scop, graphite_dim_t p)
       c = isl_inequality_alloc (isl_local_space_from_space (space));
       mpz_init (g);
       tree_int_to_gmp (lb, g);
-      v = isl_val_int_from_gmp (the_isl_ctx, g);
+      v = isl_val_int_from_gmp (scop->ctx, g);
       v = isl_val_neg (v);
       mpz_clear (g);
       c = isl_constraint_set_constant_val (c, v);
@@ -1359,7 +1356,7 @@ add_param_constraints (scop_p scop, graphite_dim_t p)
 
       mpz_init (g);
       tree_int_to_gmp (ub, g);
-      v = isl_val_int_from_gmp (the_isl_ctx, g);
+      v = isl_val_int_from_gmp (scop->ctx, g);
       mpz_clear (g);
       c = isl_constraint_set_constant_val (c, v);
       c = isl_constraint_set_coefficient_si (c, isl_dim_param, p, -1);
@@ -1495,20 +1492,19 @@ pdr_add_memory_accesses (isl_map *acc, data_reference_p dr, poly_bb_p pbb)
    domain.  */
 
 static isl_set *
-pdr_add_data_dimensions (isl_set *extent, scop_p scop, data_reference_p dr)
+pdr_add_data_dimensions (isl_set *subscript_sizes, scop_p scop,
+			 data_reference_p dr)
 {
   tree ref = DR_REF (dr);
-  int i, nb_subscripts = DR_NUM_DIMENSIONS (dr);
 
-  for (i = nb_subscripts - 1; i >= 0; i--, ref = TREE_OPERAND (ref, 0))
+  int nb_subscripts = DR_NUM_DIMENSIONS (dr);
+  for (int i = nb_subscripts - 1; i >= 0; i--, ref = TREE_OPERAND (ref, 0))
     {
-      tree low, high;
-
       if (TREE_CODE (ref) != ARRAY_REF)
-	break;
+	return subscript_sizes;
 
-      low = array_ref_low_bound (ref);
-      high = array_ref_up_bound (ref);
+      tree low = array_ref_low_bound (ref);
+      tree high = array_ref_up_bound (ref);
 
       /* XXX The PPL code dealt separately with
          subscript - low >= 0 and high - subscript >= 0 in case one of
@@ -1526,10 +1522,10 @@ pdr_add_data_dimensions (isl_set *extent, scop_p scop, data_reference_p dr)
 	  isl_aff *aff;
 	  isl_set *univ, *lbs, *ubs;
 	  isl_pw_aff *index;
-	  isl_space *space;
 	  isl_set *valid;
-	  isl_pw_aff *lb = extract_affine_int (low, isl_set_get_space (extent));
-	  isl_pw_aff *ub = extract_affine_int (high, isl_set_get_space (extent));
+	  isl_space *space = isl_set_get_space (subscript_sizes);
+	  isl_pw_aff *lb = extract_affine_int (low, isl_space_copy (space));
+	  isl_pw_aff *ub = extract_affine_int (high, isl_space_copy (space));
 
 	  /* high >= 0 */
 	  valid = isl_pw_aff_nonneg_set (isl_pw_aff_copy (ub));
@@ -1537,25 +1533,24 @@ pdr_add_data_dimensions (isl_set *extent, scop_p scop, data_reference_p dr)
 				       isl_set_dim (valid, isl_dim_set));
 	  scop->context = isl_set_intersect (scop->context, valid);
 
-	  space = isl_set_get_space (extent);
 	  aff = isl_aff_zero_on_domain (isl_local_space_from_space (space));
 	  aff = isl_aff_add_coefficient_si (aff, isl_dim_in, i + 1, 1);
 	  univ = isl_set_universe (isl_space_domain (isl_aff_get_space (aff)));
 	  index = isl_pw_aff_alloc (univ, aff);
 
-	  id = isl_set_get_tuple_id (extent);
+	  id = isl_set_get_tuple_id (subscript_sizes);
 	  lb = isl_pw_aff_set_tuple_id (lb, isl_dim_in, isl_id_copy (id));
 	  ub = isl_pw_aff_set_tuple_id (ub, isl_dim_in, id);
 
 	  /* low <= sub_i <= high */
 	  lbs = isl_pw_aff_ge_set (isl_pw_aff_copy (index), lb);
 	  ubs = isl_pw_aff_le_set (index, ub);
-	  extent = isl_set_intersect (extent, lbs);
-	  extent = isl_set_intersect (extent, ubs);
+	  subscript_sizes = isl_set_intersect (subscript_sizes, lbs);
+	  subscript_sizes = isl_set_intersect (subscript_sizes, ubs);
 	}
     }
 
-  return extent;
+  return subscript_sizes;
 }
 
 /* Build data accesses for DR in PBB.  */
@@ -1565,7 +1560,7 @@ build_poly_dr (data_reference_p dr, poly_bb_p pbb)
 {
   int dr_base_object_set;
   isl_map *acc;
-  isl_set *extent;
+  isl_set *subscript_sizes;
   scop_p scop = PBB_SCOP (pbb);
 
   {
@@ -1592,9 +1587,10 @@ build_poly_dr (data_reference_p dr, poly_bb_p pbb)
       alias_set_num = *(bap->alias_set);
 
     space = isl_space_set_tuple_id (space, isl_dim_set, id);
-    extent = isl_set_nat_universe (space);
-    extent = isl_set_fix_si (extent, isl_dim_set, 0, alias_set_num);
-    extent = pdr_add_data_dimensions (extent, scop, dr);
+    subscript_sizes = isl_set_nat_universe (space);
+    subscript_sizes = isl_set_fix_si (subscript_sizes, isl_dim_set, 0,
+				      alias_set_num);
+    subscript_sizes = pdr_add_data_dimensions (subscript_sizes, scop, dr);
   }
 
   gcc_assert (dr->aux);
@@ -1602,7 +1598,7 @@ build_poly_dr (data_reference_p dr, poly_bb_p pbb)
 
   new_poly_dr (pbb, dr_base_object_set,
 	       DR_IS_READ (dr) ? PDR_READ : PDR_WRITE,
-	       dr, DR_NUM_DIMENSIONS (dr), acc, extent);
+	       dr, DR_NUM_DIMENSIONS (dr), acc, subscript_sizes);
 }
 
 /* Write to FILE the alias graph of data references in DIMACS format.  */
@@ -1930,14 +1926,14 @@ build_scop_drs (scop_p scop)
 
 /* Return a gsi at the position of the phi node STMT.  */
 
-static gimple_stmt_iterator
-gsi_for_phi_node (gimple stmt)
+static gphi_iterator
+gsi_for_phi_node (gphi *stmt)
 {
-  gimple_stmt_iterator psi;
+  gphi_iterator psi;
   basic_block bb = gimple_bb (stmt);
 
   for (psi = gsi_start_phis (bb); !gsi_end_p (psi); gsi_next (&psi))
-    if (stmt == gsi_stmt (psi))
+    if (stmt == psi.phi ())
       return psi;
 
   gcc_unreachable ();
@@ -2005,7 +2001,7 @@ insert_out_of_ssa_copy (scop_p scop, tree res, tree expr, gimple after_stmt)
   gimple_seq stmts;
   gimple_stmt_iterator gsi;
   tree var = force_gimple_operand (expr, &stmts, true, NULL_TREE);
-  gimple stmt = gimple_build_assign (unshare_expr (res), var);
+  gassign *stmt = gimple_build_assign (unshare_expr (res), var);
   auto_vec<gimple, 3> x;
 
   gimple_seq_add_stmt (&stmts, stmt);
@@ -2234,10 +2230,10 @@ rewrite_close_phi_out_of_ssa (scop_p scop, gimple_stmt_iterator *psi)
    dimension array for it.  */
 
 static void
-rewrite_phi_out_of_ssa (scop_p scop, gimple_stmt_iterator *psi)
+rewrite_phi_out_of_ssa (scop_p scop, gphi_iterator *psi)
 {
   size_t i;
-  gimple phi = gsi_stmt (*psi);
+  gphi *phi = psi->phi ();
   basic_block bb = gimple_bb (phi);
   tree res = gimple_phi_result (phi);
   tree zero_dim_array = create_zero_dim_array (res, "phi_out_of_ssa");
@@ -2268,12 +2264,12 @@ rewrite_phi_out_of_ssa (scop_p scop, gimple_stmt_iterator *psi)
    form "x = phi (y, y, ..., y)" to "x = y".  */
 
 static void
-rewrite_degenerate_phi (gimple_stmt_iterator *psi)
+rewrite_degenerate_phi (gphi_iterator *psi)
 {
   tree rhs;
   gimple stmt;
   gimple_stmt_iterator gsi;
-  gimple phi = gsi_stmt (*psi);
+  gphi *phi = psi->phi ();
   tree res = gimple_phi_result (phi);
   basic_block bb;
 
@@ -2294,14 +2290,14 @@ static void
 rewrite_reductions_out_of_ssa (scop_p scop)
 {
   basic_block bb;
-  gimple_stmt_iterator psi;
+  gphi_iterator psi;
   sese region = SCOP_REGION (scop);
 
   FOR_EACH_BB_FN (bb, cfun)
     if (bb_in_sese_p (bb, region))
       for (psi = gsi_start_phis (bb); !gsi_end_p (psi);)
 	{
-	  gimple phi = gsi_stmt (psi);
+	  gphi *phi = psi.phi ();
 
 	  if (virtual_operand_p (gimple_phi_result (phi)))
 	    {
@@ -2340,7 +2336,7 @@ rewrite_cross_bb_scalar_dependence (scop_p scop, tree zero_dim_array,
 
   gcc_assert (gimple_code (use_stmt) != GIMPLE_PHI);
 
-  name = copy_ssa_name (def, NULL);
+  name = copy_ssa_name (def);
   name_stmt = gimple_build_assign (name, zero_dim_array);
 
   gimple_assign_set_lhs (name_stmt, name);
@@ -2360,7 +2356,7 @@ rewrite_cross_bb_scalar_dependence (scop_p scop, tree zero_dim_array,
 static void
 handle_scalar_deps_crossing_scop_limits (scop_p scop, tree def, gimple stmt)
 {
-  tree var = create_tmp_reg (TREE_TYPE (def), NULL);
+  tree var = create_tmp_reg (TREE_TYPE (def));
   tree new_name = make_ssa_name (var, stmt);
   bool needs_copy = false;
   use_operand_p use_p;
@@ -2445,10 +2441,10 @@ rewrite_cross_bb_scalar_deps (scop_p scop, gimple_stmt_iterator *gsi)
   handle_scalar_deps_crossing_scop_limits (scop, def, stmt);
 
   FOR_EACH_IMM_USE_STMT (use_stmt, imm_iter, def)
-    if (gimple_code (use_stmt) == GIMPLE_PHI
-	&& (res = true))
+    if (gphi *phi = dyn_cast <gphi *> (use_stmt))
       {
-	gimple_stmt_iterator psi = gsi_for_stmt (use_stmt);
+	res = true;
+	gphi_iterator psi = gsi_for_phi (phi);
 
 	if (scalar_close_phi_node_p (gsi_stmt (psi)))
 	  rewrite_close_phi_out_of_ssa (scop, &psi);
@@ -2609,15 +2605,26 @@ is_reduction_operation_p (gimple stmt)
   gcc_assert (is_gimple_assign (stmt));
   code = gimple_assign_rhs_code (stmt);
 
-  return flag_associative_math
-    && commutative_tree_code (code)
-    && associative_tree_code (code);
+  if (!commutative_tree_code (code)
+      || !associative_tree_code (code))
+    return false;
+
+  tree type = TREE_TYPE (gimple_assign_lhs (stmt));
+
+  if (FLOAT_TYPE_P (type))
+    return flag_associative_math;
+
+  if (ANY_INTEGRAL_TYPE_P (type))
+    return (TYPE_OVERFLOW_WRAPS (type)
+	    || !operation_can_overflow (code));
+
+  return false;
 }
 
 /* Returns true when PHI contains an argument ARG.  */
 
 static bool
-phi_contains_arg (gimple phi, tree arg)
+phi_contains_arg (gphi *phi, tree arg)
 {
   size_t i;
 
@@ -2630,7 +2637,7 @@ phi_contains_arg (gimple phi, tree arg)
 
 /* Return a loop phi node that corresponds to a reduction containing LHS.  */
 
-static gimple
+static gphi *
 follow_ssa_with_commutative_ops (tree arg, tree lhs)
 {
   gimple stmt;
@@ -2644,10 +2651,10 @@ follow_ssa_with_commutative_ops (tree arg, tree lhs)
       || gimple_code (stmt) == GIMPLE_CALL)
     return NULL;
 
-  if (gimple_code (stmt) == GIMPLE_PHI)
+  if (gphi *phi = dyn_cast <gphi *> (stmt))
     {
-      if (phi_contains_arg (stmt, lhs))
-	return stmt;
+      if (phi_contains_arg (phi, lhs))
+	return phi;
       return NULL;
     }
 
@@ -2659,7 +2666,8 @@ follow_ssa_with_commutative_ops (tree arg, tree lhs)
 
   if (is_reduction_operation_p (stmt))
     {
-      gimple res = follow_ssa_with_commutative_ops (gimple_assign_rhs1 (stmt), lhs);
+      gphi *res
+	= follow_ssa_with_commutative_ops (gimple_assign_rhs1 (stmt), lhs);
 
       return res ? res :
 	follow_ssa_with_commutative_ops (gimple_assign_rhs2 (stmt), lhs);
@@ -2671,12 +2679,12 @@ follow_ssa_with_commutative_ops (tree arg, tree lhs)
 /* Detect commutative and associative scalar reductions starting at
    the STMT.  Return the phi node of the reduction cycle, or NULL.  */
 
-static gimple
+static gphi *
 detect_commutative_reduction_arg (tree lhs, gimple stmt, tree arg,
 				  vec<gimple> *in,
 				  vec<gimple> *out)
 {
-  gimple phi = follow_ssa_with_commutative_ops (arg, lhs);
+  gphi *phi = follow_ssa_with_commutative_ops (arg, lhs);
 
   if (!phi)
     return NULL;
@@ -2689,7 +2697,7 @@ detect_commutative_reduction_arg (tree lhs, gimple stmt, tree arg,
 /* Detect commutative and associative scalar reductions starting at
    STMT.  Return the phi node of the reduction cycle, or NULL.  */
 
-static gimple
+static gphi *
 detect_commutative_reduction_assign (gimple stmt, vec<gimple> *in,
 				     vec<gimple> *out)
 {
@@ -2702,9 +2710,9 @@ detect_commutative_reduction_assign (gimple stmt, vec<gimple> *in,
 
   if (is_reduction_operation_p (stmt))
     {
-      gimple res = detect_commutative_reduction_arg (lhs, stmt,
-						     gimple_assign_rhs1 (stmt),
-						     in, out);
+      gphi *res = detect_commutative_reduction_arg (lhs, stmt,
+						    gimple_assign_rhs1 (stmt),
+						    in, out);
       return res ? res
 	: detect_commutative_reduction_arg (lhs, stmt,
 					    gimple_assign_rhs2 (stmt),
@@ -2716,7 +2724,7 @@ detect_commutative_reduction_assign (gimple stmt, vec<gimple> *in,
 
 /* Return a loop phi node that corresponds to a reduction containing LHS.  */
 
-static gimple
+static gphi *
 follow_inital_value_to_phi (tree arg, tree lhs)
 {
   gimple stmt;
@@ -2726,9 +2734,9 @@ follow_inital_value_to_phi (tree arg, tree lhs)
 
   stmt = SSA_NAME_DEF_STMT (arg);
 
-  if (gimple_code (stmt) == GIMPLE_PHI
-      && phi_contains_arg (stmt, lhs))
-    return stmt;
+  if (gphi *phi = dyn_cast <gphi *> (stmt))
+    if (phi_contains_arg (phi, lhs))
+      return phi;
 
   return NULL;
 }
@@ -2738,7 +2746,7 @@ follow_inital_value_to_phi (tree arg, tree lhs)
    from outside the loop.  */
 
 static edge
-edge_initial_value_for_loop_phi (gimple phi)
+edge_initial_value_for_loop_phi (gphi *phi)
 {
   size_t i;
 
@@ -2758,7 +2766,7 @@ edge_initial_value_for_loop_phi (gimple phi)
    from outside the loop.  */
 
 static tree
-initial_value_for_loop_phi (gimple phi)
+initial_value_for_loop_phi (gphi *phi)
 {
   size_t i;
 
@@ -2802,13 +2810,14 @@ used_outside_reduction (tree def, gimple loop_phi)
    the SCOP starting at the loop closed phi node STMT.  Return the phi
    node of the reduction cycle, or NULL.  */
 
-static gimple
+static gphi *
 detect_commutative_reduction (scop_p scop, gimple stmt, vec<gimple> *in,
 			      vec<gimple> *out)
 {
   if (scalar_close_phi_node_p (stmt))
     {
-      gimple def, loop_phi, phi, close_phi = stmt;
+      gimple def;
+      gphi *loop_phi, *phi, *close_phi = as_a <gphi *> (stmt);
       tree init, lhs, arg = gimple_phi_arg_def (close_phi, 0);
 
       if (TREE_CODE (arg) != SSA_NAME)
@@ -2848,10 +2857,10 @@ detect_commutative_reduction (scop_p scop, gimple stmt, vec<gimple> *in,
 
 static void
 translate_scalar_reduction_to_array_for_stmt (scop_p scop, tree red,
-					      gimple stmt, gimple loop_phi)
+					      gimple stmt, gphi *loop_phi)
 {
   tree res = gimple_phi_result (loop_phi);
-  gimple assign = gimple_build_assign (res, unshare_expr (red));
+  gassign *assign = gimple_build_assign (res, unshare_expr (red));
   gimple_stmt_iterator gsi;
 
   insert_stmts (scop, assign, NULL, gsi_after_labels (gimple_bb (loop_phi)));
@@ -2866,7 +2875,7 @@ translate_scalar_reduction_to_array_for_stmt (scop_p scop, tree red,
    the PHI_RESULT.  */
 
 static void
-remove_phi (gimple phi)
+remove_phi (gphi *phi)
 {
   imm_use_iterator imm_iter;
   tree def;
@@ -2929,7 +2938,7 @@ dr_indices_valid_in_loop (tree ref ATTRIBUTE_UNUSED, tree *index, void *data)
    NULL_TREE.  */
 
 static tree
-close_phi_written_to_memory (gimple close_phi)
+close_phi_written_to_memory (gphi *close_phi)
 {
   imm_use_iterator imm_iter;
   use_operand_p use_p;
@@ -2984,29 +2993,32 @@ translate_scalar_reduction_to_array (scop_p scop,
 				     vec<gimple> in,
 				     vec<gimple> out)
 {
-  gimple loop_phi;
+  gimple loop_stmt;
   unsigned int i = out.length () - 1;
-  tree red = close_phi_written_to_memory (out[i]);
+  tree red = close_phi_written_to_memory (as_a <gphi *> (out[i]));
 
-  FOR_EACH_VEC_ELT (in, i, loop_phi)
+  FOR_EACH_VEC_ELT (in, i, loop_stmt)
     {
-      gimple close_phi = out[i];
+      gimple close_stmt = out[i];
 
       if (i == 0)
 	{
-	  gimple stmt = loop_phi;
-	  basic_block bb = split_reduction_stmt (scop, stmt);
+	  basic_block bb = split_reduction_stmt (scop, loop_stmt);
 	  poly_bb_p pbb = pbb_from_bb (bb);
 	  PBB_IS_REDUCTION (pbb) = true;
-	  gcc_assert (close_phi == loop_phi);
+	  gcc_assert (close_stmt == loop_stmt);
 
 	  if (!red)
 	    red = create_zero_dim_array
-	      (gimple_assign_lhs (stmt), "Commutative_Associative_Reduction");
+	      (gimple_assign_lhs (loop_stmt), "Commutative_Associative_Reduction");
 
-	  translate_scalar_reduction_to_array_for_stmt (scop, red, stmt, in[1]);
+	  translate_scalar_reduction_to_array_for_stmt (scop, red, loop_stmt,
+							as_a <gphi *> (in[1]));
 	  continue;
 	}
+
+      gphi *loop_phi = as_a <gphi *> (loop_stmt);
+      gphi *close_phi = as_a <gphi *> (close_stmt);
 
       if (i == in.length () - 1)
 	{
@@ -3027,7 +3039,7 @@ translate_scalar_reduction_to_array (scop_p scop,
 
 static bool
 rewrite_commutative_reductions_out_of_ssa_close_phi (scop_p scop,
-						     gimple close_phi)
+						     gphi *close_phi)
 {
   bool res;
   auto_vec<gimple, 10> in;
@@ -3048,7 +3060,7 @@ static bool
 rewrite_commutative_reductions_out_of_ssa_loop (scop_p scop,
 						loop_p loop)
 {
-  gimple_stmt_iterator gsi;
+  gphi_iterator gsi;
   edge exit = single_exit (loop);
   tree res;
   bool changed = false;
@@ -3057,11 +3069,11 @@ rewrite_commutative_reductions_out_of_ssa_loop (scop_p scop,
     return false;
 
   for (gsi = gsi_start_phis (exit->dest); !gsi_end_p (gsi); gsi_next (&gsi))
-    if ((res = gimple_phi_result (gsi_stmt (gsi)))
+    if ((res = gimple_phi_result (gsi.phi ()))
 	&& !virtual_operand_p (res)
 	&& !scev_analyzable_p (res, SCOP_REGION (scop)))
       changed |= rewrite_commutative_reductions_out_of_ssa_close_phi
-	(scop, gsi_stmt (gsi));
+	(scop, gsi.phi ());
 
   return changed;
 }
@@ -3098,7 +3110,7 @@ static bool
 scop_ivs_can_be_represented (scop_p scop)
 {
   loop_p loop;
-  gimple_stmt_iterator psi;
+  gphi_iterator psi;
   bool result = true;
 
   FOR_EACH_LOOP (loop, 0)
@@ -3109,7 +3121,7 @@ scop_ivs_can_be_represented (scop_p scop)
       for (psi = gsi_start_phis (loop->header);
 	   !gsi_end_p (psi); gsi_next (&psi))
 	{
-	  gimple phi = gsi_stmt (psi);
+	  gphi *phi = psi.phi ();
 	  tree res = PHI_RESULT (phi);
 	  tree type = TREE_TYPE (res);
 
@@ -3147,8 +3159,7 @@ build_poly_scop (scop_p scop)
   if (!scop_ivs_can_be_represented (scop))
     return;
 
-  if (flag_associative_math)
-    rewrite_commutative_reductions_out_of_ssa (scop);
+  rewrite_commutative_reductions_out_of_ssa (scop);
 
   build_sese_loop_nests (region);
   /* Record all conditions in REGION.  */
@@ -3178,4 +3189,4 @@ build_poly_scop (scop_p scop)
      representation.  */
   POLY_SCOP_P (scop) = true;
 }
-#endif
+#endif  /* HAVE_isl */

@@ -1,5 +1,5 @@
 /* Convert a program in SSA form into Normal form.
-   Copyright (C) 2004-2014 Free Software Foundation, Inc.
+   Copyright (C) 2004-2015 Free Software Foundation, Inc.
    Contributed by Andrew Macleod <amacleod@redhat.com>
 
 This file is part of GCC.
@@ -21,26 +21,22 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "gimple.h"
+#include "rtl.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stor-layout.h"
-#include "basic-block.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
 #include "gimple-pretty-print.h"
-#include "bitmap.h"
-#include "sbitmap.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
 #include "tree-eh.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "dumpfile.h"
 #include "diagnostic-core.h"
 #include "tree-ssa-live.h"
@@ -50,6 +46,15 @@ along with GCC; see the file COPYING3.  If not see
 
 /* FIXME: A lot of code here deals with expanding to RTL.  All that code
    should be in cfgexpand.c.  */
+#include "flags.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
 
 /* Return TRUE if expression STMT is suitable for replacement.  */
@@ -211,11 +216,9 @@ set_location_for_edge (edge e)
    SRC/DEST might be BLKmode memory locations SIZEEXP is a tree from
    which we deduce the size to copy in that case.  */
 
-static inline rtx
+static inline rtx_insn *
 emit_partition_copy (rtx dest, rtx src, int unsignedsrcp, tree sizeexp)
 {
-  rtx seq;
-
   start_sequence ();
 
   if (GET_MODE (src) != VOIDmode && GET_MODE (src) != GET_MODE (dest))
@@ -228,7 +231,7 @@ emit_partition_copy (rtx dest, rtx src, int unsignedsrcp, tree sizeexp)
   else
     emit_move_insn (dest, src);
 
-  seq = get_insns ();
+  rtx_insn *seq = get_insns ();
   end_sequence ();
 
   return seq;
@@ -240,7 +243,6 @@ static void
 insert_partition_copy_on_edge (edge e, int dest, int src, source_location locus)
 {
   tree var;
-  rtx seq;
   if (dump_file && (dump_flags & TDF_DETAILS))
     {
       fprintf (dump_file,
@@ -260,10 +262,10 @@ insert_partition_copy_on_edge (edge e, int dest, int src, source_location locus)
     set_curr_insn_location (locus);
 
   var = partition_to_var (SA.map, src);
-  seq = emit_partition_copy (copy_rtx (SA.partition_to_pseudo[dest]),
-			     copy_rtx (SA.partition_to_pseudo[src]),
-			     TYPE_UNSIGNED (TREE_TYPE (var)),
-			     var);
+  rtx_insn *seq = emit_partition_copy (copy_rtx (SA.partition_to_pseudo[dest]),
+				       copy_rtx (SA.partition_to_pseudo[src]),
+				       TYPE_UNSIGNED (TREE_TYPE (var)),
+				       var);
 
   insert_insn_on_edge (seq, e);
 }
@@ -275,9 +277,8 @@ static void
 insert_value_copy_on_edge (edge e, int dest, tree src, source_location locus)
 {
   rtx dest_rtx, seq, x;
-  enum machine_mode dest_mode, src_mode;
+  machine_mode dest_mode, src_mode;
   int unsignedp;
-  tree var;
 
   if (dump_file && (dump_flags & TDF_DETAILS))
     {
@@ -299,12 +300,12 @@ insert_value_copy_on_edge (edge e, int dest, tree src, source_location locus)
 
   start_sequence ();
 
-  var = SSA_NAME_VAR (partition_to_var (SA.map, dest));
+  tree name = partition_to_var (SA.map, dest);
   src_mode = TYPE_MODE (TREE_TYPE (src));
   dest_mode = GET_MODE (dest_rtx);
-  gcc_assert (src_mode == TYPE_MODE (TREE_TYPE (var)));
+  gcc_assert (src_mode == TYPE_MODE (TREE_TYPE (name)));
   gcc_assert (!REG_P (dest_rtx)
-	      || dest_mode == promote_decl_mode (var, &unsignedp));
+	      || dest_mode == promote_ssa_mode (name, &unsignedp));
 
   if (src_mode != dest_mode)
     {
@@ -334,7 +335,6 @@ static void
 insert_rtx_to_part_on_edge (edge e, int dest, rtx src, int unsignedsrcp,
 			    source_location locus)
 {
-  rtx seq;
   if (dump_file && (dump_flags & TDF_DETAILS))
     {
       fprintf (dump_file,
@@ -356,9 +356,9 @@ insert_rtx_to_part_on_edge (edge e, int dest, rtx src, int unsignedsrcp,
      mems.  Usually we give the source.  As we result from SSA names
      the left and right size should be the same (and no WITH_SIZE_EXPR
      involved), so it doesn't matter.  */
-  seq = emit_partition_copy (copy_rtx (SA.partition_to_pseudo[dest]),
-			     src, unsignedsrcp,
-			     partition_to_var (SA.map, dest));
+  rtx_insn *seq = emit_partition_copy (copy_rtx (SA.partition_to_pseudo[dest]),
+				       src, unsignedsrcp,
+				       partition_to_var (SA.map, dest));
 
   insert_insn_on_edge (seq, e);
 }
@@ -370,7 +370,6 @@ static void
 insert_part_to_rtx_on_edge (edge e, rtx dest, int src, source_location locus)
 {
   tree var;
-  rtx seq;
   if (dump_file && (dump_flags & TDF_DETAILS))
     {
       fprintf (dump_file,
@@ -389,10 +388,10 @@ insert_part_to_rtx_on_edge (edge e, rtx dest, int src, source_location locus)
     set_curr_insn_location (locus);
 
   var = partition_to_var (SA.map, src);
-  seq = emit_partition_copy (dest,
-			     copy_rtx (SA.partition_to_pseudo[src]),
-			     TYPE_UNSIGNED (TREE_TYPE (var)),
-			     var);
+  rtx_insn *seq = emit_partition_copy (dest,
+				       copy_rtx (SA.partition_to_pseudo[src]),
+				       TYPE_UNSIGNED (TREE_TYPE (var)),
+				       var);
 
   insert_insn_on_edge (seq, e);
 }
@@ -581,13 +580,13 @@ eliminate_build (elim_graph g)
 {
   tree Ti;
   int p0, pi;
-  gimple_stmt_iterator gsi;
+  gphi_iterator gsi;
 
   clear_elim_graph (g);
 
   for (gsi = gsi_start_phis (g->e->dest); !gsi_end_p (gsi); gsi_next (&gsi))
     {
-      gimple phi = gsi_stmt (gsi);
+      gphi *phi = gsi.phi ();
       source_location locus;
 
       p0 = var_to_partition (g->map, gimple_phi_result (phi));
@@ -682,13 +681,12 @@ elim_backward (elim_graph g, int T)
 static rtx
 get_temp_reg (tree name)
 {
-  tree var = TREE_CODE (name) == SSA_NAME ? SSA_NAME_VAR (name) : name;
-  tree type = TREE_TYPE (var);
+  tree type = TREE_TYPE (name);
   int unsignedp;
-  enum machine_mode reg_mode = promote_decl_mode (var, &unsignedp);
+  machine_mode reg_mode = promote_ssa_mode (name, &unsignedp);
   rtx x = gen_reg_rtx (reg_mode);
   if (POINTER_TYPE_P (type))
-    mark_reg_pointer (x, TYPE_ALIGN (TREE_TYPE (TREE_TYPE (var))));
+    mark_reg_pointer (x, TYPE_ALIGN (TREE_TYPE (type)));
   return x;
 }
 
@@ -788,7 +786,7 @@ eliminate_phi (edge e, elim_graph g)
    check to see if this allows another PHI node to be removed.  */
 
 static void
-remove_gimple_phi_args (gimple phi)
+remove_gimple_phi_args (gphi *phi)
 {
   use_operand_p arg_p;
   ssa_op_iter iter;
@@ -816,7 +814,7 @@ remove_gimple_phi_args (gimple phi)
 	      /* Also remove the def if it is a PHI node.  */
 	      if (gimple_code (stmt) == GIMPLE_PHI)
 		{
-		  remove_gimple_phi_args (stmt);
+		  remove_gimple_phi_args (as_a <gphi *> (stmt));
 		  gsi = gsi_for_stmt (stmt);
 		  remove_phi_node (&gsi, true);
 		}
@@ -832,14 +830,14 @@ static void
 eliminate_useless_phis (void)
 {
   basic_block bb;
-  gimple_stmt_iterator gsi;
+  gphi_iterator gsi;
   tree result;
 
   FOR_EACH_BB_FN (bb, cfun)
     {
       for (gsi = gsi_start_phis (bb); !gsi_end_p (gsi); )
         {
-	  gimple phi = gsi_stmt (gsi);
+	  gphi *phi = gsi.phi ();
 	  result = gimple_phi_result (phi);
 	  if (virtual_operand_p (result))
 	    {
@@ -895,10 +893,10 @@ rewrite_trees (var_map map ATTRIBUTE_UNUSED)
      create incorrect code.  */
   FOR_EACH_BB_FN (bb, cfun)
     {
-      gimple_stmt_iterator gsi;
+      gphi_iterator gsi;
       for (gsi = gsi_start_phis (bb); !gsi_end_p (gsi); gsi_next (&gsi))
 	{
-	  gimple phi = gsi_stmt (gsi);
+	  gphi *phi = gsi.phi ();
 	  tree T0 = var_to_partition_to_var (map, gimple_phi_result (phi));
 	  if (T0 == NULL_TREE)
 	    {
@@ -988,7 +986,7 @@ remove_ssa_form (bool perform_ter, struct ssaexpand *sa)
 
   /* Return to viewing the variable list as just all reference variables after
      coalescing has been performed.  */
-  partition_view_normal (map, false);
+  partition_view_normal (map);
 
   if (dump_file && (dump_flags & TDF_DETAILS))
     {
@@ -1097,7 +1095,7 @@ static void
 insert_backedge_copies (void)
 {
   basic_block bb;
-  gimple_stmt_iterator gsi;
+  gphi_iterator gsi;
 
   mark_dfs_back_edges ();
 
@@ -1108,7 +1106,7 @@ insert_backedge_copies (void)
 
       for (gsi = gsi_start_phis (bb); !gsi_end_p (gsi); gsi_next (&gsi))
 	{
-	  gimple phi = gsi_stmt (gsi);
+	  gphi *phi = gsi.phi ();
 	  tree result = gimple_phi_result (phi);
 	  size_t i;
 
@@ -1130,7 +1128,8 @@ insert_backedge_copies (void)
 		      || trivially_conflicts_p (bb, result, arg)))
 		{
 		  tree name;
-		  gimple stmt, last = NULL;
+		  gassign *stmt;
+		  gimple last = NULL;
 		  gimple_stmt_iterator gsi2;
 
 		  gsi2 = gsi_last_bb (gimple_phi_arg_edge (phi, i)->src);
@@ -1156,7 +1155,7 @@ insert_backedge_copies (void)
 
 		  /* Create a new instance of the underlying variable of the
 		     PHI result.  */
-		  name = copy_ssa_name (result, NULL);
+		  name = copy_ssa_name (result);
 		  stmt = gimple_build_assign (name,
 					      gimple_phi_arg_def (phi, i));
 

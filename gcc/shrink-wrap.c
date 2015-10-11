@@ -1,5 +1,5 @@
 /* Shrink-wrapping related optimizations.
-   Copyright (C) 1987-2014 Free Software Foundation, Inc.
+   Copyright (C) 1987-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -22,26 +22,31 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "rtl-error.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "rtl.h"
+#include "df.h"
+#include "rtl-error.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stor-layout.h"
 #include "varasm.h"
 #include "stringpool.h"
 #include "flags.h"
 #include "except.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "stmt.h"
 #include "expr.h"
+#include "insn-codes.h"
 #include "optabs.h"
 #include "libfuncs.h"
 #include "regs.h"
-#include "insn-config.h"
 #include "recog.h"
 #include "output.h"
 #include "tm_p.h"
@@ -51,15 +56,13 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimple-expr.h"
 #include "gimplify.h"
 #include "tree-pass.h"
-#include "predict.h"
-#include "df.h"
+#include "cfgrtl.h"
 #include "params.h"
 #include "bb-reorder.h"
 #include "shrink-wrap.h"
 #include "regcprop.h"
 #include "rtl-iter.h"
 
-#ifdef HAVE_simple_return
 
 /* Return true if INSN requires the stack frame to be set up.
    PROLOGUE_USED contains the hard registers used in the function
@@ -243,6 +246,7 @@ move_insn_for_shrink_wrap (basic_block bb, rtx_insn *insn,
 		case SUBREG:
 		case STRICT_LOW_PART:
 		case PC:
+		case LO_SUM:
 		  /* Ok.  Continue.  */
 		  break;
 
@@ -531,7 +535,7 @@ try_shrink_wrapping (edge *entry_edge, edge orig_entry_edge,
 	break;
       }
 
-  if (flag_shrink_wrap && HAVE_simple_return
+  if (SHRINK_WRAPPING_ENABLED
       && (targetm.profile_before_prologue () || !crtl->profile)
       && nonempty_prologue && !crtl->calls_eh_return)
     {
@@ -797,7 +801,6 @@ try_shrink_wrapping (edge *entry_edge, edge orig_entry_edge,
 	    FOR_EACH_BB_REVERSE_FN (bb, cfun)
 	      {
 		basic_block copy_bb, tbb;
-		rtx_insn *insert_point;
 		int eflags;
 
 		if (!bitmap_clear_bit (&bb_tail, bb->index))
@@ -827,8 +830,8 @@ try_shrink_wrapping (edge *entry_edge, edge orig_entry_edge,
 		    BB_COPY_PARTITION (copy_bb, bb);
 		  }
 
-		insert_point = emit_note_after (NOTE_INSN_DELETED,
-						BB_END (copy_bb));
+		rtx_note *insert_point = emit_note_after (NOTE_INSN_DELETED,
+							  BB_END (copy_bb));
 		emit_barrier_after (BB_END (copy_bb));
 
 		tbb = bb;
@@ -992,12 +995,11 @@ convert_to_simple_return (edge entry_edge, edge orig_entry_edge,
 	  else if (*pdest_bb == NULL)
 	    {
 	      basic_block bb;
-	      rtx_insn *start;
 
 	      bb = create_basic_block (NULL, NULL, exit_pred);
 	      BB_COPY_PARTITION (bb, e->src);
-	      start = emit_jump_insn_after (gen_simple_return (),
-					    BB_END (bb));
+	      rtx_insn *ret = targetm.gen_simple_return ();
+	      rtx_jump_insn *start = emit_jump_insn_after (ret, BB_END (bb));
 	      JUMP_LABEL (start) = simple_return_rtx;
 	      emit_barrier_after (start);
 
@@ -1021,5 +1023,3 @@ convert_to_simple_return (edge entry_edge, edge orig_entry_edge,
 	  }
     }
 }
-
-#endif

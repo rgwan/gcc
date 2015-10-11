@@ -1,6 +1,6 @@
 /* Build up a list of intrinsic subroutines and functions for the
    name-resolution stage.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
    Contributed by Andy Vaught & Katherine Holcomb
 
 This file is part of GCC.
@@ -22,7 +22,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "flags.h"
+#include "options.h"
 #include "gfortran.h"
 #include "intrinsic.h"
 
@@ -512,6 +512,29 @@ add_sym_1s (const char *name, gfc_isym_id id, enum klass cl, bt type, int kind,
   gfc_resolve_f rf;
 
   cf.f1 = check;
+  sf.f1 = simplify;
+  rf.s1 = resolve;
+
+  add_sym (name, id, cl, ACTUAL_NO, type, kind, standard, cf, sf, rf,
+	   a1, type1, kind1, optional1, intent1,
+	   (void *) 0);
+}
+
+/* Add a symbol to the subroutine ilst where the subroutine takes one
+   printf-style character argument and a variable number of arguments
+   to follow.  */
+
+static void
+add_sym_1p (const char *name, gfc_isym_id id, enum klass cl, bt type, int kind,
+	    int standard, bool (*check) (gfc_actual_arglist *),
+	    gfc_expr *(*simplify) (gfc_expr*), void (*resolve) (gfc_code *),
+	    const char *a1, bt type1, int kind1, int optional1, sym_intent intent1)
+{
+  gfc_check_f cf;
+  gfc_simplify_f sf;
+  gfc_resolve_f rf;
+
+  cf.f1m = check;
   sf.f1 = simplify;
   rf.s1 = resolve;
 
@@ -1050,11 +1073,10 @@ gfc_is_intrinsic (gfc_symbol* sym, int subroutine_flag, locus loc)
   if (!gfc_check_intrinsic_standard (isym, &symstd, false, loc)
       && !sym->attr.artificial)
     {
-      if (sym->attr.proc == PROC_UNKNOWN
-	  && gfc_option.warn_intrinsics_std)
-	gfc_warning_now ("The intrinsic '%s' at %L is not included in the"
-			 " selected standard but %s and '%s' will be"
-			 " treated as if declared EXTERNAL.  Use an"
+      if (sym->attr.proc == PROC_UNKNOWN && warn_intrinsics_std)
+	gfc_warning_now (OPT_Wintrinsics_std, "The intrinsic %qs at %L is not "
+			 "included in the selected standard but %s and %qs will"
+			 " be treated as if declared EXTERNAL.  Use an"
 			 " appropriate -std=* option or define"
 			 " -fall-intrinsics to allow this intrinsic.",
 			 sym->name, &loc, symstd, sym->name);
@@ -1087,7 +1109,7 @@ make_generic (const char *name, gfc_isym_id id, int standard ATTRIBUTE_UNUSED)
 
   g = gfc_find_function (name);
   if (g == NULL)
-    gfc_internal_error ("make_generic(): Can't find generic symbol '%s'",
+    gfc_internal_error ("make_generic(): Can't find generic symbol %qs",
 			name);
 
   gcc_assert (g->id == id);
@@ -1158,6 +1180,17 @@ make_from_module (void)
 {
   if (sizing == SZ_NOTHING)
     next_sym[-1].from_module = 1;
+}
+
+
+/* Mark the current subroutine as having a variable number of
+   arguments.  */
+
+static void
+make_vararg (void)
+{
+  if (sizing == SZ_NOTHING)
+    next_sym[-1].vararg = 1;
 }
 
 /* Set the attr.value of the current procedure.  */
@@ -3293,6 +3326,17 @@ add_subroutines (void)
 	      "fptr", BT_UNKNOWN, 0, REQUIRED, INTENT_OUT);
   make_from_module();
 
+  /* Internal subroutine for emitting a runtime error.  */
+
+  add_sym_1p ("fe_runtime_error", GFC_ISYM_FE_RUNTIME_ERROR, CLASS_IMPURE,
+	      BT_UNKNOWN, 0, GFC_STD_GNU,
+	      gfc_check_fe_runtime_error, NULL, gfc_resolve_fe_runtime_error,
+	      "msg", BT_CHARACTER, dc, REQUIRED, INTENT_IN);
+
+  make_noreturn ();
+  make_vararg ();
+  make_from_module ();
+
   /* Coarray collectives.  */
   add_sym_4s ("co_broadcast", GFC_ISYM_CO_BROADCAST, CLASS_IMPURE,
 	      BT_UNKNOWN, 0, GFC_STD_F2008_TS,
@@ -3816,7 +3860,7 @@ sort_actual (const char *name, gfc_actual_arglist **ap,
   if (a == NULL)
     goto do_sort;
 
-  gfc_error ("Too many arguments in call to '%s' at %L", name, where);
+  gfc_error ("Too many arguments in call to %qs at %L", name, where);
   return false;
 
 keywords:
@@ -3834,14 +3878,14 @@ keywords:
 	    gfc_error ("The argument list functions %%VAL, %%LOC or %%REF "
 		       "are not allowed in this context at %L", where);
 	  else
-	    gfc_error ("Can't find keyword named '%s' in call to '%s' at %L",
+	    gfc_error ("Can't find keyword named %qs in call to %qs at %L",
 		       a->name, name, where);
 	  return false;
 	}
 
       if (f->actual != NULL)
 	{
-	  gfc_error ("Argument '%s' appears twice in call to '%s' at %L",
+	  gfc_error ("Argument %qs appears twice in call to %qs at %L",
 		     f->name, name, where);
 	  return false;
 	}
@@ -3855,7 +3899,7 @@ optional:
     {
       if (f->actual == NULL && f->optional == 0)
 	{
-	  gfc_error ("Missing actual argument '%s' in call to '%s' at %L",
+	  gfc_error ("Missing actual argument %qs in call to %qs at %L",
 		     f->name, name, where);
 	  return false;
 	}
@@ -3927,7 +3971,7 @@ check_arglist (gfc_actual_arglist **ap, gfc_intrinsic_sym *sym,
       if (!gfc_compare_types (&ts, &actual->expr->ts))
 	{
 	  if (error_flag)
-	    gfc_error ("Type of argument '%s' in call to '%s' at %L should "
+	    gfc_error ("Type of argument %qs in call to %qs at %L should "
 		       "be %s, not %s", gfc_current_intrinsic_arg[i]->name,
 		       gfc_current_intrinsic, &actual->expr->where,
 		       gfc_typename (&formal->ts),
@@ -4265,7 +4309,7 @@ gfc_check_intrinsic_standard (const gfc_intrinsic_sym* isym,
   const char* symstd_msg;
 
   /* For -fall-intrinsics, just succeed.  */
-  if (gfc_option.flag_all_intrinsics)
+  if (flag_all_intrinsics)
     return true;
 
   /* Find the symbol's standard message for later usage.  */
@@ -4308,7 +4352,7 @@ gfc_check_intrinsic_standard (const gfc_intrinsic_sym* isym,
       break;
 
     default:
-      gfc_internal_error ("Invalid standard code on intrinsic '%s' (%d)",
+      gfc_internal_error ("Invalid standard code on intrinsic %qs (%d)",
 			  isym->name, isym->standard);
     }
 
@@ -4317,7 +4361,7 @@ gfc_check_intrinsic_standard (const gfc_intrinsic_sym* isym,
     {
       /* Do only print a warning if not a GNU extension.  */
       if (!silent && isym->standard != GFC_STD_GNU)
-	gfc_warning ("Intrinsic '%s' (is %s) is used at %L",
+	gfc_warning (0, "Intrinsic %qs (is %s) is used at %L",
 		     isym->name, _(symstd_msg), &where);
 
       return true;
@@ -4388,7 +4432,7 @@ gfc_intrinsic_func_interface (gfc_expr *expr, int error_flag)
   if ((isym->id == GFC_ISYM_REAL || isym->id == GFC_ISYM_DBLE
        || isym->id == GFC_ISYM_CMPLX)
       && gfc_init_expr_flag
-      && !gfc_notify_std (GFC_STD_F2003, "Function '%s' as initialization "
+      && !gfc_notify_std (GFC_STD_F2003, "Function %qs as initialization "
 			  "expression at %L", name, &expr->where))
     {
       if (!error_flag)
@@ -4502,7 +4546,7 @@ gfc_intrinsic_sub_interface (gfc_code *c, int error_flag)
 
   init_arglist (isym);
 
-  if (!sort_actual (name, &c->ext.actual, isym->formal, &c->loc))
+  if (!isym->vararg && !sort_actual (name, &c->ext.actual, isym->formal, &c->loc))
     goto fail;
 
   if (!do_ts29113_check (isym, c->ext.actual))
@@ -4535,14 +4579,14 @@ gfc_intrinsic_sub_interface (gfc_code *c, int error_flag)
 
   if (gfc_do_concurrent_flag && !isym->pure)
     {
-      gfc_error ("Subroutine call to intrinsic '%s' in DO CONCURRENT "
+      gfc_error ("Subroutine call to intrinsic %qs in DO CONCURRENT "
 		 "block at %L is not PURE", name, &c->loc);
       return MATCH_ERROR;
     }
 
   if (!isym->pure && gfc_pure (NULL))
     {
-      gfc_error ("Subroutine call to intrinsic '%s' at %L is not PURE", name,
+      gfc_error ("Subroutine call to intrinsic %qs at %L is not PURE", name,
 		 &c->loc);
       return MATCH_ERROR;
     }
@@ -4618,14 +4662,13 @@ gfc_convert_type_warn (gfc_expr *expr, gfc_typespec *ts, int eflag, int wflag)
   /* At this point, a conversion is necessary. A warning may be needed.  */
   if ((gfc_option.warn_std & sym->standard) != 0)
     {
-      gfc_warning_now ("Extension: Conversion from %s to %s at %L",
+      gfc_warning_now (0, "Extension: Conversion from %s to %s at %L",
 		       gfc_typename (&from_ts), gfc_typename (ts),
 		       &expr->where);
     }
   else if (wflag)
     {
-      if (gfc_option.flag_range_check
-	  && expr->expr_type == EXPR_CONSTANT
+      if (flag_range_check && expr->expr_type == EXPR_CONSTANT
 	  && from_ts.type == ts->type)
 	{
 	  /* Do nothing. Constants of the same type are range-checked
@@ -4652,15 +4695,18 @@ gfc_convert_type_warn (gfc_expr *expr, gfc_typespec *ts, int eflag, int wflag)
 	  /* Larger kinds can hold values of smaller kinds without problems.
 	     Hence, only warn if target kind is smaller than the source
 	     kind - or if -Wconversion-extra is specified.  */
-	  if (gfc_option.warn_conversion_extra)
-	    gfc_warning_now ("Conversion from %s to %s at %L",
-			     gfc_typename (&from_ts), gfc_typename (ts),
-			     &expr->where);
-	  else if (gfc_option.gfc_warn_conversion
-		   && from_ts.kind > ts->kind)
-	    gfc_warning_now ("Possible change of value in conversion "
-			     "from %s to %s at %L", gfc_typename (&from_ts),
-			     gfc_typename (ts), &expr->where);
+	  if (expr->expr_type != EXPR_CONSTANT)
+	    {
+	      if (warn_conversion && from_ts.kind > ts->kind)
+		gfc_warning_now (OPT_Wconversion, "Possible change of value in "
+				 "conversion from %s to %s at %L",
+				 gfc_typename (&from_ts), gfc_typename (ts),
+				 &expr->where);
+	      else if (warn_conversion_extra)
+		gfc_warning_now (OPT_Wconversion_extra, "Conversion from %s to %s "
+				 "at %L", gfc_typename (&from_ts),
+				 gfc_typename (ts), &expr->where);
+	    }
 	}
       else if ((from_ts.type == BT_REAL && ts->type == BT_INTEGER)
 	       || (from_ts.type == BT_COMPLEX && ts->type == BT_INTEGER)
@@ -4668,18 +4714,17 @@ gfc_convert_type_warn (gfc_expr *expr, gfc_typespec *ts, int eflag, int wflag)
 	{
 	  /* Conversion from REAL/COMPLEX to INTEGER or COMPLEX to REAL
 	     usually comes with a loss of information, regardless of kinds.  */
-	  if (gfc_option.warn_conversion_extra
-	      || gfc_option.gfc_warn_conversion)
-	    gfc_warning_now ("Possible change of value in conversion "
-			     "from %s to %s at %L", gfc_typename (&from_ts),
-			     gfc_typename (ts), &expr->where);
+	  if (warn_conversion && expr->expr_type != EXPR_CONSTANT)
+	    gfc_warning_now (OPT_Wconversion, "Possible change of value in "
+			     "conversion from %s to %s at %L",
+			     gfc_typename (&from_ts), gfc_typename (ts),
+			     &expr->where);
 	}
       else if (from_ts.type == BT_HOLLERITH || ts->type == BT_HOLLERITH)
 	{
 	  /* If HOLLERITH is involved, all bets are off.  */
-	  if (gfc_option.warn_conversion_extra
-	      || gfc_option.gfc_warn_conversion)
-	    gfc_warning_now ("Conversion from %s to %s at %L",
+	  if (warn_conversion)
+	    gfc_warning_now (OPT_Wconversion, "Conversion from %s to %s at %L",
 			     gfc_typename (&from_ts), gfc_typename (ts),
 			     &expr->where);
 	}
@@ -4737,7 +4782,7 @@ bad:
       return false;
     }
 
-  gfc_internal_error ("Can't convert %s to %s at %L",
+  gfc_internal_error ("Can't convert %qs to %qs at %L",
 		      gfc_typename (&from_ts), gfc_typename (ts),
 		      &expr->where);
   /* Not reached */
@@ -4809,7 +4854,7 @@ gfc_warn_intrinsic_shadow (const gfc_symbol* sym, bool in_module, bool func)
   gfc_intrinsic_sym* isym;
 
   /* If the warning is disabled, do nothing at all.  */
-  if (!gfc_option.warn_intrinsic_shadow)
+  if (!warn_intrinsic_shadow)
     return;
 
   /* Try to find an intrinsic of the same name.  */
@@ -4826,12 +4871,14 @@ gfc_warn_intrinsic_shadow (const gfc_symbol* sym, bool in_module, bool func)
 
   /* Emit the warning.  */
   if (in_module || sym->ns->proc_name)
-    gfc_warning ("'%s' declared at %L may shadow the intrinsic of the same"
+    gfc_warning (OPT_Wintrinsic_shadow,
+		 "%qs declared at %L may shadow the intrinsic of the same"
 		 " name.  In order to call the intrinsic, explicit INTRINSIC"
 		 " declarations may be required.",
 		 sym->name, &sym->declared_at);
   else
-    gfc_warning ("'%s' declared at %L is also the name of an intrinsic.  It can"
+    gfc_warning (OPT_Wintrinsic_shadow,
+		 "%qs declared at %L is also the name of an intrinsic.  It can"
 		 " only be called via an explicit interface or if declared"
 		 " EXTERNAL.", sym->name, &sym->declared_at);
 }

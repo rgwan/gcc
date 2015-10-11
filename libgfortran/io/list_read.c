@@ -1,4 +1,4 @@
-/* Copyright (C) 2002-2014 Free Software Foundation, Inc.
+/* Copyright (C) 2002-2015 Free Software Foundation, Inc.
    Contributed by Andy Vaught
    Namelist input contributed by Paul Thomas
    F2003 I/O support contributed by Jerry DeLisle
@@ -53,12 +53,12 @@ typedef unsigned char uchar;
                       case '5': case '6': case '7': case '8': case '9'
 
 #define CASE_SEPARATORS  case ' ': case ',': case '/': case '\n': case '\t': \
-                         case '\r': case ';'
+                         case '\r': case ';': case '!'
 
 /* This macro assumes that we're operating on a variable.  */
 
 #define is_separator(c) (c == '/' ||  c == ',' || c == '\n' || c == ' ' \
-                         || c == '\t' || c == '\r' || c == ';')
+                         || c == '\t' || c == '\r' || c == ';' || c == '!')
 
 /* Maximum repeat count.  Less than ten times the maximum signed int32.  */
 
@@ -523,6 +523,9 @@ eat_separator (st_parameter_dt *dtp)
     case '!':
       if (dtp->u.p.namelist_mode)
 	{			/* Eat a namelist comment.  */
+	  notify_std (&dtp->common, GFC_STD_GNU,
+		      "'!' in namelist is not a valid separator,"
+		      " try inserting a space");
 	  err = eat_line (dtp);
 	  if (err)
 	    return err;
@@ -2210,6 +2213,7 @@ cleanup:
       free_line (dtp);
       hit_eof (dtp);
     }
+  fbuf_flush_list (dtp->u.p.current_unit, LIST_READING);
   return err;
 }
 
@@ -3132,16 +3136,27 @@ get_name:
 
   if (component_flag)
     {
+#define EXT_STACK_SZ 100
+      char ext_stack[EXT_STACK_SZ];
+      char *ext_name;
       size_t var_len = strlen (root_nl->var_name);
       size_t saved_len
 	= dtp->u.p.saved_string ? strlen (dtp->u.p.saved_string) : 0;
-      char ext_name[var_len + saved_len + 1];
+      size_t ext_size = var_len + saved_len + 1;
+
+      if (ext_size > EXT_STACK_SZ)
+	ext_name = xmalloc (ext_size);
+      else
+	ext_name = ext_stack;
 
       memcpy (ext_name, root_nl->var_name, var_len);
       if (dtp->u.p.saved_string)
 	memcpy (ext_name + var_len, dtp->u.p.saved_string, saved_len);
       ext_name[var_len + saved_len] = '\0';
       nl = find_nml_node (dtp, ext_name);
+
+      if (ext_size > EXT_STACK_SZ)
+	free (ext_name);
     }
   else
     nl = find_nml_node (dtp, dtp->u.p.saved_string);

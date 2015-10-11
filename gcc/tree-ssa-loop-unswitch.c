@@ -1,5 +1,5 @@
 /* Loop unswitching.
-   Copyright (C) 2004-2014 Free Software Foundation, Inc.
+   Copyright (C) 2004-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -20,20 +20,18 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "predict.h"
 #include "tree.h"
-#include "tm_p.h"
-#include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
 #include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
+#include "tm_p.h"
+#include "internal-fn.h"
 #include "gimplify.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "tree-phinodes.h"
-#include "ssa-iterators.h"
 #include "tree-ssa-loop-niter.h"
 #include "tree-ssa-loop.h"
 #include "tree-into-ssa.h"
@@ -138,15 +136,17 @@ tree_ssa_unswitch_loops (void)
 static tree
 tree_may_unswitch_on (basic_block bb, struct loop *loop)
 {
-  gimple stmt, def;
+  gimple last, def;
+  gcond *stmt;
   tree cond, use;
   basic_block def_bb;
   ssa_op_iter iter;
 
   /* BB must end in a simple conditional jump.  */
-  stmt = last_stmt (bb);
-  if (!stmt || gimple_code (stmt) != GIMPLE_COND)
+  last = last_stmt (bb);
+  if (!last || gimple_code (last) != GIMPLE_COND)
     return NULL_TREE;
+  stmt = as_a <gcond *> (last);
 
   /* To keep the things simple, we do not directly remove the conditions,
      but just replace tests with 0 != 0 resp. 1 != 0.  Prevent the infinite
@@ -248,13 +248,15 @@ tree_unswitch_single_loop (struct loop *loop, int num)
       if (integer_nonzerop (cond))
 	{
 	  /* Remove false path.  */
-	  gimple_cond_set_condition_from_tree (stmt, boolean_true_node);
+	  gimple_cond_set_condition_from_tree (as_a <gcond *> (stmt),
+					       boolean_true_node);
 	  changed = true;
 	}
       else if (integer_zerop (cond))
 	{
 	  /* Remove true path.  */
-	  gimple_cond_set_condition_from_tree (stmt, boolean_false_node);
+	  gimple_cond_set_condition_from_tree (as_a <gcond *> (stmt),
+					       boolean_false_node);
 	  changed = true;
 	}
       /* Do not unswitch too much.  */
@@ -316,9 +318,10 @@ tree_unswitch_single_loop (struct loop *loop, int num)
 	      if (stmt
 		  && gimple_code (stmt) == GIMPLE_COND)
 		{
-		  if (gimple_cond_true_p (stmt))
+		  gcond *cond_stmt = as_a <gcond *> (stmt);
+		  if (gimple_cond_true_p (cond_stmt))
 		    flags = EDGE_FALSE_VALUE;
-		  else if (gimple_cond_false_p (stmt))
+		  else if (gimple_cond_false_p (cond_stmt))
 		    flags = EDGE_TRUE_VALUE;
 		}
 	    }

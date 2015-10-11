@@ -1,5 +1,5 @@
 /* Conditional Dead Call Elimination pass for the GNU compiler.
-   Copyright (C) 2008-2014 Free Software Foundation, Inc.
+   Copyright (C) 2008-2015 Free Software Foundation, Inc.
    Contributed by Xinliang David Li <davidxl@google.com>
 
 This file is part of GCC.
@@ -21,21 +21,19 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "basic-block.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "gimple.h"
+#include "hard-reg-set.h"
+#include "ssa.h"
+#include "alias.h"
+#include "fold-const.h"
 #include "stor-layout.h"
 #include "gimple-pretty-print.h"
-#include "tree-ssa-alias.h"
 #include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
-#include "gimple.h"
 #include "gimple-iterator.h"
-#include "gimple-ssa.h"
 #include "tree-cfg.h"
-#include "stringpool.h"
-#include "tree-ssanames.h"
 #include "tree-into-ssa.h"
 #include "tree-pass.h"
 #include "flags.h"
@@ -59,7 +57,7 @@ along with GCC; see the file COPYING3.  If not see
     An actual simple example is :
          log (x);   // Mostly dead call
      ==>
-         if (x < 0)
+         if (x <= 0)
              log (x);
      With this change, call to log (x) is effectively eliminated, as
      in majority of the cases, log won't be called with x out of
@@ -88,7 +86,7 @@ along with GCC; see the file COPYING3.  If not see
    to indicate if lb and ub value are inclusive
    respectively.  */
 
-typedef struct input_domain
+struct inp_domain
 {
   int lb;
   int ub;
@@ -96,7 +94,7 @@ typedef struct input_domain
   bool has_ub;
   bool is_lb_inclusive;
   bool is_ub_inclusive;
-} inp_domain;
+};
 
 /* A helper function to construct and return an input
    domain object.  LB is the lower bound, HAS_LB is
@@ -133,7 +131,7 @@ static bool
 check_target_format (tree arg)
 {
   tree type;
-  enum machine_mode mode;
+  machine_mode mode;
   const struct real_format *rfmt;
 
   type = TREE_TYPE (arg);
@@ -174,7 +172,7 @@ check_target_format (tree arg)
 #define MAX_BASE_INT_BIT_SIZE 32
 
 static bool
-check_pow (gimple pow_call)
+check_pow (gcall *pow_call)
 {
   tree base, expn;
   enum tree_code bc, ec;
@@ -248,7 +246,7 @@ check_pow (gimple pow_call)
    Returns true if the function call is a candidate.  */
 
 static bool
-check_builtin_call (gimple bcall)
+check_builtin_call (gcall *bcall)
 {
   tree arg;
 
@@ -261,7 +259,7 @@ check_builtin_call (gimple bcall)
    is a candidate.  */
 
 static bool
-is_call_dce_candidate (gimple call)
+is_call_dce_candidate (gcall *call)
 {
   tree fn;
   enum built_in_function fnc;
@@ -332,7 +330,9 @@ gen_one_condition (tree arg, int lbub,
 {
   tree lbub_real_cst, lbub_cst, float_type;
   tree temp, tempn, tempc, tempcn;
-  gimple stmt1, stmt2, stmt3;
+  gassign *stmt1;
+  gassign *stmt2;
+  gcond *stmt3;
 
   float_type = TREE_TYPE (arg);
   lbub_cst = build_int_cst (integer_type_node, lbub);
@@ -537,7 +537,7 @@ gen_conditions_for_pow_int_base (tree base, tree expn,
    and *NCONDS is the number of logical conditions.  */
 
 static void
-gen_conditions_for_pow (gimple pow_call, vec<gimple> conds,
+gen_conditions_for_pow (gcall *pow_call, vec<gimple> conds,
                         unsigned *nconds)
 {
   tree base, expn;
@@ -673,10 +673,10 @@ get_no_error_domain (enum built_in_function fnc)
    condition are separated by NULL tree in the vector.  */
 
 static void
-gen_shrink_wrap_conditions (gimple bi_call, vec<gimple> conds,
+gen_shrink_wrap_conditions (gcall *bi_call, vec<gimple> conds,
                             unsigned int *nconds)
 {
-  gimple call;
+  gcall *call;
   tree fn;
   enum built_in_function fnc;
 
@@ -714,7 +714,7 @@ gen_shrink_wrap_conditions (gimple bi_call, vec<gimple> conds,
    transformation actually happens.  */
 
 static bool
-shrink_wrap_one_built_in_call (gimple bi_call)
+shrink_wrap_one_built_in_call (gcall *bi_call)
 {
   gimple_stmt_iterator bi_call_bsi;
   basic_block bi_call_bb, join_tgt_bb, guard_bb, guard_bb0;
@@ -849,7 +849,7 @@ shrink_wrap_one_built_in_call (gimple bi_call)
    wrapping transformation.  */
 
 static bool
-shrink_wrap_conditional_dead_built_in_calls (vec<gimple> calls)
+shrink_wrap_conditional_dead_built_in_calls (vec<gcall *> calls)
 {
   bool changed = false;
   unsigned i = 0;
@@ -860,7 +860,7 @@ shrink_wrap_conditional_dead_built_in_calls (vec<gimple> calls)
 
   for (; i < n ; i++)
     {
-      gimple bi_call = calls[i];
+      gcall *bi_call = calls[i];
       changed |= shrink_wrap_one_built_in_call (bi_call);
     }
 
@@ -909,15 +909,14 @@ pass_call_cdce::execute (function *fun)
   basic_block bb;
   gimple_stmt_iterator i;
   bool something_changed = false;
-  auto_vec<gimple> cond_dead_built_in_calls;
+  auto_vec<gcall *> cond_dead_built_in_calls;
   FOR_EACH_BB_FN (bb, fun)
     {
       /* Collect dead call candidates.  */
       for (i = gsi_start_bb (bb); !gsi_end_p (i); gsi_next (&i))
         {
-	  gimple stmt = gsi_stmt (i);
-          if (is_gimple_call (stmt)
-              && is_call_dce_candidate (stmt))
+	  gcall *stmt = dyn_cast <gcall *> (gsi_stmt (i));
+          if (stmt && is_call_dce_candidate (stmt))
             {
               if (dump_file && (dump_flags & TDF_DETAILS))
                 {

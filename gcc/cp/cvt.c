@@ -1,5 +1,5 @@
 /* Language-level data type conversion for GNU C++.
-   Copyright (C) 1987-2014 Free Software Foundation, Inc.
+   Copyright (C) 1987-2015 Free Software Foundation, Inc.
    Hacked by Michael Tiemann (tiemann@cygnus.com)
 
 This file is part of GCC.
@@ -28,6 +28,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "stor-layout.h"
 #include "flags.h"
@@ -36,7 +37,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "convert.h"
 #include "decl.h"
 #include "target.h"
-#include "wide-int.h"
 
 static tree cp_convert_to_pointer (tree, tree, tsubst_flags_t);
 static tree convert_to_pointer_force (tree, tree, tsubst_flags_t);
@@ -595,8 +595,20 @@ ignore_overflows (tree expr, tree orig)
 tree
 cp_fold_convert (tree type, tree expr)
 {
-  tree conv = fold_convert (type, expr);
-  conv = ignore_overflows (conv, expr);
+  tree conv;
+  if (TREE_TYPE (expr) == type)
+    conv = expr;
+  else if (TREE_CODE (expr) == PTRMEM_CST)
+    {
+      /* Avoid wrapping a PTRMEM_CST in NOP_EXPR.  */
+      conv = copy_node (expr);
+      TREE_TYPE (conv) = type;
+    }
+  else
+    {
+      conv = fold_convert (type, expr);
+      conv = ignore_overflows (conv, expr);
+    }
   return conv;
 }
 
@@ -675,9 +687,8 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
     }
 
   /* FIXME remove when moving to c_fully_fold model.  */
-  /* FIXME do we still need this test?  */
   if (!CLASS_TYPE_P (type))
-    e = integral_constant_value (e);
+    e = scalar_constant_value (e);
   if (error_operand_p (e))
     return error_mark_node;
 
@@ -697,7 +708,7 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
 	 conversion.  */
       else if (TREE_CODE (type) == COMPLEX_TYPE)
 	return fold_if_not_in_template (convert_to_complex (type, e));
-      else if (TREE_CODE (type) == VECTOR_TYPE)
+      else if (VECTOR_TYPE_P (type))
 	return fold_if_not_in_template (convert_to_vector (type, e));
       else if (TREE_CODE (e) == TARGET_EXPR)
 	{
@@ -884,7 +895,7 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
     {
       /* If the conversion failed and expr was an invalid use of pointer to
 	 member function, try to report a meaningful error.  */
-      if (invalid_nonstatic_memfn_p (expr, complain))
+      if (invalid_nonstatic_memfn_p (loc, expr, complain))
 	/* We displayed the error message.  */;
       else
 	error_at (loc, "conversion from %qT to non-scalar type %qT requested",
@@ -942,7 +953,7 @@ convert_to_void (tree expr, impl_conv_void implicit, tsubst_flags_t complain)
 
   if (!TREE_TYPE (expr))
     return expr;
-  if (invalid_nonstatic_memfn_p (expr, complain))
+  if (invalid_nonstatic_memfn_p (loc, expr, complain))
     return error_mark_node;
   if (TREE_CODE (expr) == PSEUDO_DTOR_EXPR)
     {

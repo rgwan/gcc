@@ -1,5 +1,5 @@
 /* Get CPU type and Features for x86 processors.
-   Copyright (C) 2012-2014 Free Software Foundation, Inc.
+   Copyright (C) 2012-2015 Free Software Foundation, Inc.
    Contributed by Sriraman Tallam (tmsriram@google.com)
 
 This file is part of GCC.
@@ -56,6 +56,7 @@ enum processor_types
   AMDFAM10H,
   AMDFAM15H,
   INTEL_SILVERMONT,
+  INTEL_KNL,
   AMD_BTVER1,
   AMD_BTVER2,  
   CPU_TYPE_MAX
@@ -75,6 +76,8 @@ enum processor_subtypes
   AMDFAM15H_BDVER4,
   INTEL_COREI7_IVYBRIDGE,
   INTEL_COREI7_HASWELL,
+  INTEL_COREI7_BROADWELL,
+  INTEL_COREI7_SKYLAKE,
   CPU_SUBTYPE_MAX
 };
 
@@ -96,7 +99,12 @@ enum processor_features
   FEATURE_SSE4_A,
   FEATURE_FMA4,
   FEATURE_XOP,
-  FEATURE_FMA
+  FEATURE_FMA,
+  FEATURE_AVX512F,
+  FEATURE_BMI,
+  FEATURE_BMI2,
+  FEATURE_AES,
+  FEATURE_PCLMUL
 };
 
 struct __processor_model
@@ -105,7 +113,7 @@ struct __processor_model
   unsigned int __cpu_type;
   unsigned int __cpu_subtype;
   unsigned int __cpu_features[1];
-} __cpu_model;
+} __cpu_model = { };
 
 
 /* Get the specific type of AMD CPU.  */
@@ -184,9 +192,16 @@ get_intel_cpu (unsigned int family, unsigned int model, unsigned int brand_id)
 	      __cpu_model.__cpu_type = INTEL_BONNELL;
 	      break;
 	    case 0x37:
+	    case 0x4a:
 	    case 0x4d:
+	    case 0x5a:
+	    case 0x5d:
 	      /* Silvermont.  */
 	      __cpu_model.__cpu_type = INTEL_SILVERMONT;
+	      break;
+	    case 0x57:
+	      /* Knights Landing.  */
+	      __cpu_model.__cpu_type = INTEL_KNL;
 	      break;
 	    case 0x1a:
 	    case 0x1e:
@@ -216,11 +231,26 @@ get_intel_cpu (unsigned int family, unsigned int model, unsigned int brand_id)
 	      __cpu_model.__cpu_subtype = INTEL_COREI7_IVYBRIDGE;
 	      break;
 	    case 0x3c:
+	    case 0x3f:
 	    case 0x45:
 	    case 0x46:
 	      /* Haswell.  */
 	      __cpu_model.__cpu_type = INTEL_COREI7;
 	      __cpu_model.__cpu_subtype = INTEL_COREI7_HASWELL;
+	      break;
+	    case 0x3d:
+	    case 0x47:
+	    case 0x4f:
+	    case 0x56:
+	      /* Broadwell.  */
+	      __cpu_model.__cpu_type = INTEL_COREI7;
+	      __cpu_model.__cpu_subtype = INTEL_COREI7_BROADWELL;
+	      break;
+	    case 0x4e:
+	    case 0x5e:
+	      /* Skylake.  */
+	      __cpu_model.__cpu_type = INTEL_COREI7;
+	      __cpu_model.__cpu_subtype = INTEL_COREI7_SKYLAKE;
 	      break;
 	    case 0x17:
 	    case 0x1d:
@@ -258,6 +288,10 @@ get_available_features (unsigned int ecx, unsigned int edx,
     features |= (1 << FEATURE_SSE2);
   if (ecx & bit_POPCNT)
     features |= (1 << FEATURE_POPCNT);
+  if (ecx & bit_AES)
+    features |= (1 << FEATURE_AES);
+  if (ecx & bit_PCLMUL)
+    features |= (1 << FEATURE_PCLMUL);
   if (ecx & bit_SSE3)
     features |= (1 << FEATURE_SSE3);
   if (ecx & bit_SSSE3)
@@ -276,8 +310,14 @@ get_available_features (unsigned int ecx, unsigned int edx,
     {
       unsigned int eax, ebx, ecx, edx;
       __cpuid_count (7, 0, eax, ebx, ecx, edx);
+      if (ebx & bit_BMI)
+        features |= (1 << FEATURE_BMI);
       if (ebx & bit_AVX2)
 	features |= (1 << FEATURE_AVX2);
+      if (ebx & bit_BMI2)
+        features |= (1 << FEATURE_BMI2);
+      if (ebx & bit_AVX512F)
+	features |= (1 << FEATURE_AVX512F);
     }
 
   unsigned int ext_level;
@@ -403,3 +443,8 @@ __cpu_indicator_init (void)
 
   return 0;
 }
+
+#if defined SHARED && defined USE_ELF_SYMVER
+__asm__ (".symver __cpu_indicator_init, __cpu_indicator_init@GCC_4.8.0");
+__asm__ (".symver __cpu_model, __cpu_model@GCC_4.8.0");
+#endif

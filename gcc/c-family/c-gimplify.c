@@ -2,7 +2,7 @@
    by the C-based front ends.  The structure of gimplified, or
    language-independent, trees is dictated by the grammar described in this
    file.
-   Copyright (C) 2002-2014 Free Software Foundation, Inc.
+   Copyright (C) 2002-2015 Free Software Foundation, Inc.
    Lowering of expressions contributed by Sebastian Pop <s.pop@laposte.net>
    Re-written to support lowering of whole function trees, documentation
    and miscellaneous cleanups by Diego Novillo <dnovillo@redhat.com>
@@ -27,14 +27,16 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
-#include "tree.h"
-#include "c-common.h"
+#include "function.h"
+#include "predict.h"
 #include "basic-block.h"
-#include "tree-ssa-alias.h"
-#include "internal-fn.h"
-#include "gimple-expr.h"
-#include "is-a.h"
+#include "tree.h"
 #include "gimple.h"
+#include "hard-reg-set.h"
+#include "alias.h"
+#include "fold-const.h"
+#include "c-common.h"
+#include "internal-fn.h"
 #include "gimplify.h"
 #include "tree-inline.h"
 #include "diagnostic-core.h"
@@ -164,8 +166,8 @@ add_block_to_enclosing (tree block)
 {
   unsigned i;
   tree enclosing;
-  gimple bind;
-  vec<gimple> stack = gimple_bind_expr_stack ();
+  gbind *bind;
+  vec<gbind *> stack = gimple_bind_expr_stack ();
 
   FOR_EACH_VEC_ELT (stack, i, bind)
     if (gimple_bind_block (bind))
@@ -231,11 +233,32 @@ c_gimplify_expr (tree *expr_p, gimple_seq *pre_p ATTRIBUTE_UNUSED,
 
   switch (code)
     {
+    case LSHIFT_EXPR:
+    case RSHIFT_EXPR:
+      {
+	/* We used to convert the right operand of a shift-expression
+	   to an integer_type_node in the FEs.  But it is unnecessary
+	   and not desirable for diagnostics and sanitizers.  We keep
+	   this here to not pessimize the code, but we convert to an
+	   unsigned type, because negative shift counts are undefined
+	   anyway.
+	   We should get rid of this conversion when we have a proper
+	   type demotion/promotion pass.  */
+	tree *op1_p = &TREE_OPERAND (*expr_p, 1);
+	if (!VECTOR_TYPE_P (TREE_TYPE (*op1_p))
+	    && !types_compatible_p (TYPE_MAIN_VARIANT (TREE_TYPE (*op1_p)),
+				    unsigned_type_node)
+	    && !types_compatible_p (TYPE_MAIN_VARIANT (TREE_TYPE (*op1_p)),
+				    integer_type_node))
+	  *op1_p = convert (unsigned_type_node, *op1_p);
+	break;
+      }
+
     case DECL_EXPR:
       /* This is handled mostly by gimplify.c, but we have to deal with
 	 not warning about int x = x; as it is a GCC extension to turn off
 	 this warning but only if warn_init_self is zero.  */
-      if (TREE_CODE (DECL_EXPR_DECL (*expr_p)) == VAR_DECL
+      if (VAR_P (DECL_EXPR_DECL (*expr_p))
 	  && !DECL_EXTERNAL (DECL_EXPR_DECL (*expr_p))
 	  && !TREE_STATIC (DECL_EXPR_DECL (*expr_p))
 	  && (DECL_INITIAL (DECL_EXPR_DECL (*expr_p)) == DECL_EXPR_DECL (*expr_p))

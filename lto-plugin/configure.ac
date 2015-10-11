@@ -9,6 +9,7 @@ AC_ARG_WITH(libiberty,
     [specify the directory where to find libiberty [../libiberty]])],
   [], with_libiberty=../libiberty)
 AC_SUBST(with_libiberty)
+AC_USE_SYSTEM_EXTENSIONS
 AC_PROG_CC
 AC_SYS_LARGEFILE
 ACX_PROG_CC_WARNING_OPTS([-Wall], [ac_lto_plugin_warn_cflags])
@@ -33,6 +34,16 @@ else
    gcc_build_dir=../../$host_subdir/gcc
 fi
 AC_SUBST(gcc_build_dir)
+
+# Used for constructing correct paths for offload compilers.
+accel_dir_suffix=
+real_target_noncanonical=${target_noncanonical}
+if test x"$enable_as_accelerator_for" != x; then
+  accel_dir_suffix=/accel/${target_noncanonical}
+  real_target_noncanonical=${enable_as_accelerator_for}
+fi
+AC_SUBST(accel_dir_suffix)
+AC_SUBST(real_target_noncanonical)
 
 AM_PROG_LIBTOOL
 ACX_LT_HOST_FLAGS

@@ -1,5 +1,5 @@
 /* Subroutines for insn-output.c for Renesas H8/300.
-   Copyright (C) 1992-2014 Free Software Foundation, Inc.
+   Copyright (C) 1992-2015 Free Software Foundation, Inc.
    Contributed by Steve Chamberlain (sac@cygnus.com),
    Jim Wilson (wilson@cygnus.com), and Doug Evans (dje@cygnus.com).
 
@@ -22,38 +22,45 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "rtl.h"
+#include "backend.h"
+#include "cfghooks.h"
 #include "tree.h"
+#include "rtl.h"
+#include "df.h"
+#include "alias.h"
 #include "stor-layout.h"
 #include "varasm.h"
 #include "calls.h"
 #include "stringpool.h"
 #include "regs.h"
-#include "hard-reg-set.h"
 #include "insn-config.h"
 #include "conditions.h"
 #include "output.h"
 #include "insn-attr.h"
 #include "flags.h"
 #include "recog.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "emit-rtl.h"
+#include "stmt.h"
 #include "expr.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
+#include "insn-codes.h"
 #include "optabs.h"
 #include "diagnostic-core.h"
 #include "c-family/c-pragma.h"	/* ??? */
 #include "tm_p.h"
 #include "tm-constrs.h"
-#include "ggc.h"
 #include "target.h"
-#include "target-def.h"
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "lcm.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "builtins.h"
+
+/* This file should be included last.  */
+#include "target-def.h"
 
 /* Classifies a h8300_src_operand or h8300_dst_operand.
 
@@ -106,7 +113,7 @@ static bool h8300_print_operand_punct_valid_p (unsigned char code);
 #ifndef OBJECT_FORMAT_ELF
 static void h8300_asm_named_section (const char *, unsigned int, tree);
 #endif
-static int h8300_register_move_cost (enum machine_mode, reg_class_t, reg_class_t);
+static int h8300_register_move_cost (machine_mode, reg_class_t, reg_class_t);
 static int h8300_and_costs (rtx);
 static int h8300_shift_costs (rtx);
 static void          h8300_push_pop               (int, int, bool, bool);
@@ -124,7 +131,7 @@ static unsigned int  h8300_binary_length          (rtx_insn *, const h8300_lengt
 static bool          h8300_short_move_mem_p       (rtx, enum rtx_code);
 static unsigned int  h8300_move_length            (rtx *, const h8300_length_table *);
 static bool	     h8300_hard_regno_scratch_ok  (unsigned int);
-static rtx	     h8300_get_index (rtx, enum machine_mode mode, int *);
+static rtx	     h8300_get_index (rtx, machine_mode mode, int *);
 
 /* CPU_TYPE, says what cpu we're compiling for.  */
 int cpu_type;
@@ -383,6 +390,14 @@ h8300_option_override (void)
                - Option ignored!");
    }
 
+#ifdef H8300_LINUX 
+ if ((TARGET_NORMAL_MODE))
+   {
+      error ("-mn is not supported for linux targets");
+      target_flags ^= MASK_NORMAL_MODE;
+   }
+#endif
+
   /* Some of the shifts are optimized for speed by default.
      See http://gcc.gnu.org/ml/gcc-patches/2002-07/msg01858.html
      If optimizing for size, change shift_alg for those shift to
@@ -512,7 +527,7 @@ Fpa (rtx par)
   int i;
 
   for (i = 0; i < len; i++)
-    F (as_a <rtx_insn *> (XVECEXP (par, 0, i)), true);
+    RTX_FRAME_RELATED_P (XVECEXP (par, 0, i)) = 1;
 
   return par;
 }
@@ -596,7 +611,7 @@ compute_saved_regs (void)
 /* Emit an insn to push register RN.  */
 
 static rtx
-push (int rn)
+push (int rn, bool in_prologue)
 {
   rtx reg = gen_rtx_REG (word_mode, rn);
   rtx x;
@@ -607,7 +622,7 @@ push (int rn)
     x = gen_push_h8300hs_advanced (reg);
   else
     x = gen_push_h8300hs_normal (reg);
-  x = F (emit_insn (x), true);
+  x = F (emit_insn (x), in_prologue);
   add_reg_note (x, REG_INC, stack_pointer_rtx);
   return x;
 }
@@ -660,7 +675,7 @@ h8300_push_pop (int regno, int nregs, bool pop_p, bool return_p)
       if (pop_p)
 	pop (regno);
       else
-	push (regno);
+	push (regno, false);
       return;
     }
 
@@ -696,13 +711,12 @@ h8300_push_pop (int regno, int nregs, bool pop_p, bool return_p)
 	  lhs = gen_rtx_MEM (SImode, plus_constant (Pmode, sp, (j + 1) * -4));
 	  rhs = gen_rtx_REG (SImode, regno + j);
 	}
-      RTVEC_ELT (vec, i + j) = gen_rtx_SET (VOIDmode, lhs, rhs);
+      RTVEC_ELT (vec, i + j) = gen_rtx_SET (lhs, rhs);
     }
 
   /* Add the stack adjustment.  */
   offset = GEN_INT ((pop_p ? nregs : -nregs) * 4);
-  RTVEC_ELT (vec, i + j) = gen_rtx_SET (VOIDmode, sp,
-					gen_rtx_PLUS (Pmode, sp, offset));
+  RTVEC_ELT (vec, i + j) = gen_rtx_SET (sp, gen_rtx_PLUS (Pmode, sp, offset));
 
   x = gen_rtx_PARALLEL (VOIDmode, vec);
   if (!pop_p)
@@ -845,7 +859,7 @@ h8300_expand_prologue (void)
   if (frame_pointer_needed)
     {
       /* Push fp.  */
-      push (HARD_FRAME_POINTER_REGNUM);
+      push (HARD_FRAME_POINTER_REGNUM, true);
       F (emit_move_insn (hard_frame_pointer_rtx, stack_pointer_rtx), true);
     }
 
@@ -878,6 +892,12 @@ h8300_expand_prologue (void)
 
   /* Leave room for locals.  */
   h8300_emit_stack_adjustment (-1, round_frame_size (get_frame_size ()), true);
+
+  if (flag_stack_usage_info)
+    current_function_static_stack_size
+      = round_frame_size (get_frame_size ())
+      + (__builtin_popcount (saved_regs) * UNITS_PER_WORD)
+      + (frame_pointer_needed ? UNITS_PER_WORD : 0);
 }
 
 /* Return nonzero if we can use "rts" for the function currently being
@@ -983,12 +1003,12 @@ h8300_file_start (void)
 {
   default_file_start ();
 
-  if (TARGET_H8300H)
-    fputs (TARGET_NORMAL_MODE ? "\t.h8300hn\n" : "\t.h8300h\n", asm_out_file);
-  else if (TARGET_H8300SX)
+  if (TARGET_H8300SX)
     fputs (TARGET_NORMAL_MODE ? "\t.h8300sxn\n" : "\t.h8300sx\n", asm_out_file);
   else if (TARGET_H8300S)
     fputs (TARGET_NORMAL_MODE ? "\t.h8300sn\n" : "\t.h8300s\n", asm_out_file);
+  else if (TARGET_H8300H)
+    fputs (TARGET_NORMAL_MODE ? "\t.h8300hn\n" : "\t.h8300h\n", asm_out_file);
 }
 
 /* Output assembly language code for the end of file.  */
@@ -1005,7 +1025,7 @@ h8300_file_end (void)
    instead of adds/subs.  */
 
 void
-split_adds_subs (enum machine_mode mode, rtx *operands)
+split_adds_subs (machine_mode mode, rtx *operands)
 {
   HOST_WIDE_INT val = INTVAL (operands[1]);
   rtx reg = operands[0];
@@ -1078,7 +1098,7 @@ h8300_pr_saveall (struct cpp_reader *pfile ATTRIBUTE_UNUSED)
    case the first 3 arguments are passed in registers.  */
 
 static rtx
-h8300_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
+h8300_function_arg (cumulative_args_t cum_v, machine_mode mode,
 		    const_tree type, bool named)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -1151,7 +1171,7 @@ h8300_function_arg (cumulative_args_t cum_v, enum machine_mode mode,
    (TYPE is null for libcalls where that information may not be available.)  */
 
 static void
-h8300_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
+h8300_function_arg_advance (cumulative_args_t cum_v, machine_mode mode,
 			    const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
@@ -1169,7 +1189,7 @@ h8300_function_arg_advance (cumulative_args_t cum_v, enum machine_mode mode,
    shortcuts.  */
 
 static int
-h8300_register_move_cost (enum machine_mode mode ATTRIBUTE_UNUSED,
+h8300_register_move_cost (machine_mode mode ATTRIBUTE_UNUSED,
                          reg_class_t from, reg_class_t to)
 {
   if (from == MAC_REGS || to == MAC_REG)
@@ -1221,9 +1241,11 @@ h8300_shift_costs (rtx x)
 /* Worker function for TARGET_RTX_COSTS.  */
 
 static bool
-h8300_rtx_costs (rtx x, int code, int outer_code, int opno ATTRIBUTE_UNUSED,
-		 int *total, bool speed)
+h8300_rtx_costs (rtx x, machine_mode mode ATTRIBUTE_UNUSED, int outer_code,
+		 int opno ATTRIBUTE_UNUSED, int *total, bool speed)
 {
+  int code = GET_CODE (x);
+
   if (TARGET_H8300SX && outer_code == MEM)
     {
       /* Estimate the number of execution states needed to calculate
@@ -2108,7 +2130,7 @@ notice_update_cc (rtx body, rtx_insn *insn)
    if the address is known to be valid, but its mode is unknown.  */
 
 static rtx
-h8300_get_index (rtx x, enum machine_mode mode, int *size)
+h8300_get_index (rtx x, machine_mode mode, int *size)
 {
   int dummy, factor;
 
@@ -2734,14 +2756,14 @@ h8sx_emit_movmd (rtx dest, rtx src, rtx length,
 void
 h8300_swap_into_er6 (rtx addr)
 {
-  rtx insn = push (HARD_FRAME_POINTER_REGNUM);
+  rtx insn = push (HARD_FRAME_POINTER_REGNUM, false);
   if (frame_pointer_needed)
     add_reg_note (insn, REG_CFA_DEF_CFA,
 		  plus_constant (Pmode, gen_rtx_MEM (Pmode, stack_pointer_rtx),
 				 2 * UNITS_PER_WORD));
   else
     add_reg_note (insn, REG_CFA_ADJUST_CFA,
-		  gen_rtx_SET (VOIDmode, stack_pointer_rtx,
+		  gen_rtx_SET (stack_pointer_rtx,
 			       plus_constant (Pmode, stack_pointer_rtx, 4)));
 
   emit_move_insn (hard_frame_pointer_rtx, addr);
@@ -2763,14 +2785,13 @@ h8300_swap_out_of_er6 (rtx addr)
     emit_move_insn (addr, hard_frame_pointer_rtx);
 
   insn = pop (HARD_FRAME_POINTER_REGNUM);
-  RTX_FRAME_RELATED_P (insn) = 1;
   if (frame_pointer_needed)
     add_reg_note (insn, REG_CFA_DEF_CFA,
 		  plus_constant (Pmode, hard_frame_pointer_rtx,
 				 2 * UNITS_PER_WORD));
   else
     add_reg_note (insn, REG_CFA_ADJUST_CFA,
-		  gen_rtx_SET (VOIDmode, stack_pointer_rtx,
+		  gen_rtx_SET (stack_pointer_rtx,
 			       plus_constant (Pmode, stack_pointer_rtx, -4)));
 }
 
@@ -2783,7 +2804,7 @@ compute_mov_length (rtx *operands)
      length, assuming the largest addressing mode is used, and then
      adjust later in the function.  Otherwise, we compute and return
      the exact length in one step.  */
-  enum machine_mode mode = GET_MODE (operands[0]);
+  machine_mode mode = GET_MODE (operands[0]);
   rtx dest = operands[0];
   rtx src = operands[1];
   rtx addr;
@@ -3033,7 +3054,7 @@ compute_mov_length (rtx *operands)
 const char *
 output_plussi (rtx *operands)
 {
-  enum machine_mode mode = GET_MODE (operands[0]);
+  machine_mode mode = GET_MODE (operands[0]);
 
   gcc_assert (mode == SImode);
 
@@ -3117,7 +3138,7 @@ output_plussi (rtx *operands)
 unsigned int
 compute_plussi_length (rtx *operands)
 {
-  enum machine_mode mode = GET_MODE (operands[0]);
+  machine_mode mode = GET_MODE (operands[0]);
 
   gcc_assert (mode == SImode);
 
@@ -3196,7 +3217,7 @@ compute_plussi_length (rtx *operands)
 enum attr_cc
 compute_plussi_cc (rtx *operands)
 {
-  enum machine_mode mode = GET_MODE (operands[0]);
+  machine_mode mode = GET_MODE (operands[0]);
 
   gcc_assert (mode == SImode);
 
@@ -3251,7 +3272,7 @@ compute_plussi_cc (rtx *operands)
 /* Output a logical insn.  */
 
 const char *
-output_logical_op (enum machine_mode mode, rtx *operands)
+output_logical_op (machine_mode mode, rtx *operands)
 {
   /* Figure out the logical op that we need to perform.  */
   enum rtx_code code = GET_CODE (operands[3]);
@@ -3432,7 +3453,7 @@ output_logical_op (enum machine_mode mode, rtx *operands)
 /* Compute the length of a logical insn.  */
 
 unsigned int
-compute_logical_op_length (enum machine_mode mode, rtx *operands)
+compute_logical_op_length (machine_mode mode, rtx *operands)
 {
   /* Figure out the logical op that we need to perform.  */
   enum rtx_code code = GET_CODE (operands[3]);
@@ -3578,7 +3599,7 @@ compute_logical_op_length (enum machine_mode mode, rtx *operands)
 /* Compute which flag bits are valid after a logical insn.  */
 
 enum attr_cc
-compute_logical_op_cc (enum machine_mode mode, rtx *operands)
+compute_logical_op_cc (machine_mode mode, rtx *operands)
 {
   /* Figure out the logical op that we need to perform.  */
   enum rtx_code code = GET_CODE (operands[3]);
@@ -3669,13 +3690,13 @@ h8300_expand_branch (rtx operands[])
   rtx tmp;
 
   tmp = gen_rtx_COMPARE (VOIDmode, op0, op1);
-  emit_insn (gen_rtx_SET (VOIDmode, cc0_rtx, tmp));
+  emit_insn (gen_rtx_SET (cc0_rtx, tmp));
 
   tmp = gen_rtx_fmt_ee (code, VOIDmode, cc0_rtx, const0_rtx);
   tmp = gen_rtx_IF_THEN_ELSE (VOIDmode, tmp,
 			      gen_rtx_LABEL_REF (VOIDmode, label),
 			      pc_rtx);
-  emit_jump_insn (gen_rtx_SET (VOIDmode, pc_rtx, tmp));
+  emit_jump_insn (gen_rtx_SET (pc_rtx, tmp));
 }
 
 
@@ -3691,10 +3712,10 @@ h8300_expand_store (rtx operands[])
   rtx tmp;
 
   tmp = gen_rtx_COMPARE (VOIDmode, op0, op1);
-  emit_insn (gen_rtx_SET (VOIDmode, cc0_rtx, tmp));
+  emit_insn (gen_rtx_SET (cc0_rtx, tmp));
 
   tmp = gen_rtx_fmt_ee (code, GET_MODE (dest), cc0_rtx, const0_rtx);
-  emit_insn (gen_rtx_SET (VOIDmode, dest, tmp));
+  emit_insn (gen_rtx_SET (dest, tmp));
 }
 
 /* Shifts.
@@ -3736,7 +3757,7 @@ h8300_expand_store (rtx operands[])
 /* Classify a shift with the given mode and code.  OP is the shift amount.  */
 
 enum h8sx_shift_type
-h8sx_classify_shift (enum machine_mode mode, enum rtx_code code, rtx op)
+h8sx_classify_shift (machine_mode mode, enum rtx_code code, rtx op)
 {
   if (!TARGET_H8300SX)
     return H8SX_SHIFT_NONE;
@@ -3828,7 +3849,7 @@ output_h8sx_shift (rtx *operands, int suffix, int optype)
 /* Emit code to do shifts.  */
 
 bool
-expand_a_shift (enum machine_mode mode, enum rtx_code code, rtx operands[])
+expand_a_shift (machine_mode mode, enum rtx_code code, rtx operands[])
 {
   switch (h8sx_classify_shift (mode, code, operands[2]))
     {
@@ -3851,7 +3872,7 @@ expand_a_shift (enum machine_mode mode, enum rtx_code code, rtx operands[])
   emit_insn (gen_rtx_PARALLEL
 	     (VOIDmode,
 	      gen_rtvec (2,
-			 gen_rtx_SET (VOIDmode, copy_rtx (operands[0]),
+			 gen_rtx_SET (copy_rtx (operands[0]),
 				      gen_rtx_fmt_ee (code, mode,
 						      copy_rtx (operands[0]), operands[2])),
 			 gen_rtx_CLOBBER (VOIDmode,
@@ -4072,10 +4093,10 @@ get_shift_alg (enum shift_type shift_type, enum shift_mode shift_mode,
   /* Find the target CPU.  */
   if (TARGET_H8300)
     cpu = H8_300;
-  else if (TARGET_H8300H)
-    cpu = H8_300H;
-  else
+  else if (TARGET_H8300S)
     cpu = H8_S;
+  else
+    cpu = H8_300H;
 
   /* Find the shift algorithm.  */
   info->alg = SHIFT_LOOP;
@@ -4361,7 +4382,7 @@ get_shift_alg (enum shift_type shift_type, enum shift_mode shift_mode,
 	      info->cc_inline = CC_SET_ZNV;
 	      goto end;
 	    case SHIFT_ASHIFTRT:
-	      info->special = "mov.b\t%z0,%w0\n\tbld\t#7,%w0\n\tsubx\t%x0,%x0\n\tsubx\t%x0,%x0\n\tsubx\t%x0,%x0";
+	      info->special = "mov.b\t%z0,%w0\n\tbld\t#7,%w0\n\tsubx\t%x0,%x0\n\tsubx\t%y0,%y0\n\tsubx\t%z0,%z0";
 	      info->shift1  = "shar.b\t%w0";
 	      info->cc_inline = CC_SET_ZNV;
 	      goto end;
@@ -4507,7 +4528,7 @@ get_shift_alg (enum shift_type shift_type, enum shift_mode shift_mode,
    needed for some shift with COUNT and MODE.  Return 0 otherwise.  */
 
 int
-h8300_shift_needs_scratch_p (int count, enum machine_mode mode)
+h8300_shift_needs_scratch_p (int count, machine_mode mode)
 {
   enum h8_cpu cpu;
   int a, lr, ar;
@@ -4518,10 +4539,10 @@ h8300_shift_needs_scratch_p (int count, enum machine_mode mode)
   /* Find out the target CPU.  */
   if (TARGET_H8300)
     cpu = H8_300;
-  else if (TARGET_H8300H)
-    cpu = H8_300H;
-  else
+  else if (TARGET_H8300S)
     cpu = H8_S;
+  else
+    cpu = H8_300H;
 
   /* Find the shift algorithm.  */
   switch (mode)
@@ -4560,7 +4581,7 @@ output_a_shift (rtx *operands)
 {
   static int loopend_lab;
   rtx shift = operands[3];
-  enum machine_mode mode = GET_MODE (shift);
+  machine_mode mode = GET_MODE (shift);
   enum rtx_code code = GET_CODE (shift);
   enum shift_type shift_type;
   enum shift_mode shift_mode;
@@ -4730,7 +4751,7 @@ unsigned int
 compute_a_shift_length (rtx insn ATTRIBUTE_UNUSED, rtx *operands)
 {
   rtx shift = operands[3];
-  enum machine_mode mode = GET_MODE (shift);
+  machine_mode mode = GET_MODE (shift);
   enum rtx_code code = GET_CODE (shift);
   enum shift_type shift_type;
   enum shift_mode shift_mode;
@@ -4878,7 +4899,7 @@ enum attr_cc
 compute_a_shift_cc (rtx insn ATTRIBUTE_UNUSED, rtx *operands)
 {
   rtx shift = operands[3];
-  enum machine_mode mode = GET_MODE (shift);
+  machine_mode mode = GET_MODE (shift);
   enum rtx_code code = GET_CODE (shift);
   enum shift_type shift_type;
   enum shift_mode shift_mode;
@@ -4973,7 +4994,7 @@ expand_a_rotate (rtx operands[])
   rtx dst = operands[0];
   rtx src = operands[1];
   rtx rotate_amount = operands[2];
-  enum machine_mode mode = GET_MODE (dst);
+  machine_mode mode = GET_MODE (dst);
 
   if (h8sx_classify_shift (mode, ROTATE, rotate_amount) == H8SX_SHIFT_UNARY)
     return false;
@@ -5057,7 +5078,7 @@ output_a_rotate (enum rtx_code code, rtx *operands)
   const char *insn_buf;
   int bits;
   int amount;
-  enum machine_mode mode = GET_MODE (dst);
+  machine_mode mode = GET_MODE (dst);
 
   gcc_assert (GET_CODE (rotate_amount) == CONST_INT);
 
@@ -5160,7 +5181,7 @@ compute_a_rotate_length (rtx *operands)
 {
   rtx src = operands[1];
   rtx amount_rtx = operands[2];
-  enum machine_mode mode = GET_MODE (src);
+  machine_mode mode = GET_MODE (src);
   int amount;
   unsigned int length = 0;
 
@@ -5614,6 +5635,12 @@ h8300_eightbit_constant_address_p (rtx x)
   if (GET_CODE (x) == SYMBOL_REF)
     return (SYMBOL_REF_FLAGS (x) & SYMBOL_FLAG_EIGHTBIT_DATA) != 0;
 
+  if (GET_CODE (x) == CONST
+      && GET_CODE (XEXP (x, 0)) == PLUS
+      && GET_CODE (XEXP (XEXP (x, 0), 0)) == SYMBOL_REF
+      && (SYMBOL_REF_FLAGS (XEXP (XEXP (x, 0), 0)) & SYMBOL_FLAG_EIGHTBIT_DATA) != 0)
+    return 1;
+
   if (GET_CODE (x) != CONST_INT)
     return 0;
 
@@ -5839,7 +5866,7 @@ h8300_rtx_ok_for_base_p (rtx x, int strict)
    CONSTANT_ADDRESS.  */
 
 static bool
-h8300_legitimate_address_p (enum machine_mode mode, rtx x, bool strict)
+h8300_legitimate_address_p (machine_mode mode, rtx x, bool strict)
 {
   /* The register indirect addresses like @er0 is always valid.  */
   if (h8300_rtx_ok_for_base_p (x, strict))
@@ -5871,7 +5898,7 @@ h8300_legitimate_address_p (enum machine_mode mode, rtx x, bool strict)
    types on the H8 series to handle more than 32bits.  */
 
 int
-h8300_hard_regno_nregs (int regno ATTRIBUTE_UNUSED, enum machine_mode mode)
+h8300_hard_regno_nregs (int regno ATTRIBUTE_UNUSED, machine_mode mode)
 {
   return (GET_MODE_SIZE (mode) + UNITS_PER_WORD - 1) / UNITS_PER_WORD;
 }
@@ -5879,7 +5906,7 @@ h8300_hard_regno_nregs (int regno ATTRIBUTE_UNUSED, enum machine_mode mode)
 /* Worker function for HARD_REGNO_MODE_OK.  */
 
 int
-h8300_hard_regno_mode_ok (int regno, enum machine_mode mode)
+h8300_hard_regno_mode_ok (int regno, machine_mode mode)
 {
   if (TARGET_H8300)
     /* If an even reg, then anything goes.  Otherwise the mode must be
@@ -5953,7 +5980,7 @@ h8300_function_value (const_tree ret_type,
    On the H8 the return value is in R0/R1.  */
 
 static rtx
-h8300_libcall_value (enum machine_mode mode, const_rtx fun ATTRIBUTE_UNUSED)
+h8300_libcall_value (machine_mode mode, const_rtx fun ATTRIBUTE_UNUSED)
 {
   return gen_rtx_REG (mode, R0_REG);
 }

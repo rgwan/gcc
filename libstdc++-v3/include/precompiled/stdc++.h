@@ -1,6 +1,6 @@
 // C++ includes used for precompiling -*- C++ -*-
 
-// Copyright (C) 2003-2014 Free Software Foundation, Inc.
+// Copyright (C) 2003-2015 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -98,6 +98,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <codecvt>
 #include <condition_variable>
 #include <forward_list>
 #include <future>
@@ -114,4 +115,8 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#endif
+
+#if __cplusplus >= 201402L
+#include <shared_mutex>
 #endif

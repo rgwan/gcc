@@ -6,7 +6,7 @@
  *                                                                          *
  *                              C Header File                               *
  *                                                                          *
- *          Copyright (C) 1992-2014, Free Software Foundation, Inc.         *
+ *          Copyright (C) 1992-2015, Free Software Foundation, Inc.         *
  *                                                                          *
  * GNAT is free software;  you can  redistribute it  and/or modify it under *
  * terms of the  GNU General Public License as published  by the Free Soft- *
@@ -36,7 +36,7 @@ extern "C" {
 #include <sys/stat.h>
 #include <stdio.h>
 
-#ifdef _WIN32
+#if defined (_WIN32) || defined (__CYGWIN__)
 #include "mingw32.h"
 #endif
 
@@ -51,7 +51,7 @@ extern "C" {
    determine at compile time what support the system offers for large files.
    For now we just list the platforms we have manually tested. */
 
-#if defined (__GLIBC__) || defined (sun)
+#if defined (__GLIBC__) || defined (__sun__)
 #define GNAT_FOPEN fopen64
 #define GNAT_OPEN open64
 #define GNAT_STAT stat64
@@ -279,10 +279,10 @@ extern char * __gnat_locate_file_with_predicate    (char *, char *,
 						    int (*)(char*));
 
 #if defined (__ANDROID__)
-#undef linux
+#undef __linux__
 extern void   *__gnat_lwp_self                     (void);
 
-#elif defined (linux)
+#elif defined (__linux__)
 extern void   *__gnat_lwp_self			   (void);
 
 /* Routines for interface to required CPU set primitives */
@@ -299,7 +299,7 @@ extern void   __gnat_cpu_set                       (int, size_t, cpu_set_t *);
 #if defined (_WIN32)
 /* Interface to delete a handle from internally maintained list of child
    process handles on Windows */
-extern void
+extern int
 __gnat_win32_remove_handle (HANDLE h, int pid);
 #endif
 

@@ -1,5 +1,5 @@
 /* Language-dependent hooks for C++.
-   Copyright (C) 2001-2014 Free Software Foundation, Inc.
+   Copyright (C) 2001-2015 Free Software Foundation, Inc.
    Contributed by Alexandre Oliva  <aoliva@redhat.com>
 
 This file is part of GCC.
@@ -22,6 +22,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "stor-layout.h"
 #include "cp-tree.h"
@@ -30,7 +31,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "langhooks-def.h"
 #include "debug.h"
 #include "cp-objcp-common.h"
-#include "hashtab.h"
 #include "target.h"
 #include "parser.h"
 
@@ -118,7 +118,7 @@ cxx_dwarf_name (tree t, int verbosity)
   gcc_assert (DECL_P (t));
 
   if (DECL_NAME (t)
-      && (ANON_AGGRNAME_P (DECL_NAME (t)) || LAMBDA_TYPE_P (t)))
+      && (anon_aggrname_p (DECL_NAME (t)) || LAMBDA_TYPE_P (t)))
     return NULL;
   if (verbosity >= 2)
     return decl_as_dwarf_string (t,

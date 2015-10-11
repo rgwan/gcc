@@ -1,5 +1,5 @@
 ;; ARM Cortex-A53 pipeline description
-;; Copyright (C) 2013-2014 Free Software Foundation, Inc.
+;; Copyright (C) 2013-2015 Free Software Foundation, Inc.
 ;;
 ;; Contributed by ARM Ltd.
 ;;
@@ -360,7 +360,7 @@
 ;; Crude Advanced SIMD approximation.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define_insn_reservation "cortex_53_advsimd" 4
+(define_insn_reservation "cortex_a53_advsimd" 4
   (and (eq_attr "tune" "cortexa53")
        (eq_attr "is_neon_type" "yes"))
   "cortex_a53_simd0")

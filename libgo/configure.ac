@@ -11,7 +11,7 @@ AC_INIT(package-unused, version-unused,, libgo)
 AC_CONFIG_SRCDIR(Makefile.am)
 AC_CONFIG_HEADER(config.h)
 
-libtool_VERSION=6:0:0
+libtool_VERSION=7:0:0
 AC_SUBST(libtool_VERSION)
 
 AM_ENABLE_MULTILIB(, ..)
@@ -194,6 +194,9 @@ is_m68k=no
 mips_abi=unknown
 is_ppc=no
 is_ppc64=no
+is_ppc64le=no
+is_s390=no
+is_s390x=no
 is_sparc=no
 is_sparc64=no
 is_x86_64=no
@@ -264,11 +267,30 @@ changequote([,])dnl
 #ifdef _ARCH_PPC64
 #error 64-bit
 #endif],
-[is_ppc=yes], [is_ppc64=yes])
+[is_ppc=yes],
+    [AC_COMPILE_IFELSE([
+#if defined(_BIG_ENDIAN) || defined(__BIG_ENDIAN__)
+#error 64be
+#endif],
+[is_ppc64le=yes],[is_ppc64=yes])])
     if test "$is_ppc" = "yes"; then
       GOARCH=ppc
-    else
+    elif test "$is_ppc64" = "yes"; then
       GOARCH=ppc64
+    else
+      GOARCH=ppc64le
+    fi
+    ;;
+  s390*-*-*)
+    AC_COMPILE_IFELSE([
+#if defined(__s390x__)
+#error 64-bit
+#endif],
+[is_s390=yes], [is_s390x=yes])
+    if test "$is_s390" = "yes"; then
+      GOARCH=s390
+    else
+      GOARCH=s390x
     fi
     ;;
   sparc*-*-*)
@@ -296,6 +318,9 @@ AM_CONDITIONAL(LIBGO_IS_MIPSN64, test $mips_abi = n64)
 AM_CONDITIONAL(LIBGO_IS_MIPSO64, test $mips_abi = o64)
 AM_CONDITIONAL(LIBGO_IS_PPC, test $is_ppc = yes)
 AM_CONDITIONAL(LIBGO_IS_PPC64, test $is_ppc64 = yes)
+AM_CONDITIONAL(LIBGO_IS_PPC64LE, test $is_ppc64le = yes)
+AM_CONDITIONAL(LIBGO_IS_S390, test $is_s390 = yes)
+AM_CONDITIONAL(LIBGO_IS_S390X, test $is_s390x = yes)
 AM_CONDITIONAL(LIBGO_IS_SPARC, test $is_sparc = yes)
 AM_CONDITIONAL(LIBGO_IS_SPARC64, test $is_sparc64 = yes)
 AM_CONDITIONAL(LIBGO_IS_X86_64, test $is_x86_64 = yes)
@@ -376,6 +401,14 @@ if test "$libgo_cv_c_linker_supports_split_stack" = yes; then
 	    [Define if the linker support split stack adjustments])
 fi
 
+AC_CACHE_CHECK([whether compiler is llgo],
+[libgo_cv_c_goc_is_llgo],
+[libgo_cv_c_goc_is_llgo=no
+if $GOC -dumpversion 2>/dev/null | grep llgo >/dev/null 2>&1; then
+  libgo_cv_c_goc_is_llgo=yes
+fi])
+AM_CONDITIONAL(GOC_IS_LLGO, test "$libgo_cv_c_goc_is_llgo" = yes)
+
 dnl Test for the -lm library.
 MATH_LIBS=
 AC_CHECK_LIB([m], [sqrt], MATH_LIBS=-lm)
@@ -440,56 +473,6 @@ AC_C_BIGENDIAN
 
 GCC_CHECK_UNWIND_GETIPINFO
 
-AC_ARG_ENABLE(sjlj-exceptions,
-  AC_HELP_STRING([--enable-sjlj-exceptions],
-		 [force use of builtin_setjmp for exceptions]),
-  [case "$enableval" in
-   yes|no|auto) ;;
-   *) AC_MSG_ERROR([unknown argument to --enable-sjlj-exceptions]) ;;
-   esac],
-  [enable_sjlj_exceptions=auto])
-
-AC_CACHE_CHECK([whether to use setjmp/longjmp exceptions],
-[libgo_cv_lib_sjlj_exceptions],
-[AC_LANG_CONFTEST(
-  [AC_LANG_SOURCE([
-void bar ();
-void clean (int *);
-void foo ()
-{
-  int i __attribute__ ((cleanup (clean)));
-  bar();
-}
-])])
-CFLAGS_hold=$CFLAGS
-CFLAGS="--save-temps -fexceptions"
-libgo_cv_lib_sjlj_exceptions=unknown
-AS_IF([ac_fn_c_try_compile],
-  [if grep _Unwind_SjLj_Resume conftest.s >/dev/null 2>&1; then
-    libgo_cv_lib_sjlj_exceptions=yes
-  elif grep _Unwind_Resume conftest.s >/dev/null 2>&1; then
-    libgo_cv_lib_sjlj_exceptions=no
-  fi])
-CFLAGS=$CFLAGS_hold
-rm -f conftest*
-])
-
-if test "$enable_sjlj_exceptions" = "auto"; then
-  enable_sjlj_exceptions=$libgo_cv_lib_sjlj_exceptions
-fi
-
-case $enable_sjlj_exceptions in
-yes)
-  AC_DEFINE(LIBGO_SJLJ_EXCEPTIONS, 1,
-	[Define if the C++ compiler is configured for setjmp/longjmp exceptions.])
-  ;;
-no)
-  ;;
-*)
-  AC_MSG_ERROR([unable to detect exception model])
-  ;;
-esac
-
 AC_CHECK_HEADERS(sched.h sys/file.h sys/mman.h syscall.h sys/epoll.h sys/inotify.h sys/ptrace.h sys/syscall.h sys/user.h sys/utsname.h sys/select.h sys/socket.h net/if.h net/if_arp.h net/route.h netpacket/packet.h sys/prctl.h sys/mount.h sys/vfs.h sys/statfs.h sys/timex.h sys/sysinfo.h utime.h linux/ether.h linux/fs.h linux/reboot.h netinet/icmp6.h netinet/in_syst.h netinet/ip.h netinet/ip_mroute.h netinet/if_ether.h)
 
 AC_CHECK_HEADERS([linux/filter.h linux/if_addr.h linux/if_ether.h linux/if_tun.h linux/netlink.h linux/rtnetlink.h], [], [],
@@ -518,7 +501,7 @@ fi
 
 AM_CONDITIONAL(HAVE_SYS_MMAN_H, test "$ac_cv_header_sys_mman_h" = yes)
 
-AC_CHECK_FUNCS(strerror_r strsignal wait4 mincore setenv dl_iterate_phdr)
+AC_CHECK_FUNCS(strerror_r strsignal wait4 mincore setenv unsetenv dl_iterate_phdr)
 AM_CONDITIONAL(HAVE_STRERROR_R, test "$ac_cv_func_strerror_r" = yes)
 AM_CONDITIONAL(HAVE_WAIT4, test "$ac_cv_func_wait4" = yes)
 

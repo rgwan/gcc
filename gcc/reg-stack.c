@@ -1,5 +1,5 @@
 /* Register to Stack convert for GNU compiler.
-   Copyright (C) 1992-2014 Free Software Foundation, Inc.
+   Copyright (C) 1992-2015 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -152,28 +152,25 @@
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
 #include "tree.h"
+#include "rtl.h"
+#include "df.h"
+#include "alias.h"
 #include "varasm.h"
 #include "rtl-error.h"
 #include "tm_p.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
-#include "function.h"
 #include "insn-config.h"
 #include "regs.h"
 #include "flags.h"
 #include "recog.h"
-#include "basic-block.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "reload.h"
-#include "ggc.h"
 #include "tree-pass.h"
 #include "target.h"
-#include "df.h"
 #include "emit-rtl.h"  /* FIXME: Can go away once crtl is moved to rtl.h.  */
 #include "rtl-iter.h"
 
@@ -436,7 +433,7 @@ get_true_reg (rtx *pat)
 
       case UNSPEC:
 	if (XINT (*pat, 1) == UNSPEC_TRUNC_NOOP
-	    || XINT (*pat, 1) == UNSPEC_LDA)
+	    || XINT (*pat, 1) == UNSPEC_FILD_ATOMIC)
 	  pat = & XVECEXP (*pat, 0, 0);
 	return pat;
 
@@ -770,7 +767,7 @@ emit_pop_insn (rtx_insn *insn, stack_ptr regstack, rtx reg, enum emit_where wher
 
   gcc_assert (hard_regno >= FIRST_STACK_REG);
 
-  pop_rtx = gen_rtx_SET (VOIDmode, FP_MODE_REG (hard_regno, DFmode),
+  pop_rtx = gen_rtx_SET (FP_MODE_REG (hard_regno, DFmode),
 			 FP_MODE_REG (FIRST_STACK_REG, DFmode));
 
   if (where == EMIT_AFTER)
@@ -800,7 +797,7 @@ emit_swap_insn (rtx_insn *insn, stack_ptr regstack, rtx reg)
 {
   int hard_regno;
   rtx swap_rtx;
-  int tmp, other_reg;		/* swap regno temps */
+  int other_reg;		/* swap regno temps */
   rtx_insn *i1;			/* the stack-reg insn prior to INSN */
   rtx i1set = NULL_RTX;		/* the SET rtx within I1 */
 
@@ -821,10 +818,7 @@ emit_swap_insn (rtx_insn *insn, stack_ptr regstack, rtx reg)
   gcc_assert (hard_regno >= FIRST_STACK_REG);
 
   other_reg = regstack->top - (hard_regno - FIRST_STACK_REG);
-
-  tmp = regstack->reg[other_reg];
-  regstack->reg[other_reg] = regstack->reg[regstack->top];
-  regstack->reg[regstack->top] = tmp;
+  std::swap (regstack->reg[regstack->top], regstack->reg[other_reg]);
 
   /* Find the previous insn involving stack regs, but don't pass a
      block boundary.  */
@@ -906,7 +900,7 @@ static void
 swap_to_top (rtx_insn *insn, stack_ptr regstack, rtx src1, rtx src2)
 {
   struct stack_def temp_stack;
-  int regno, j, k, temp;
+  int regno, j, k;
 
   temp_stack = *regstack;
 
@@ -918,9 +912,7 @@ swap_to_top (rtx_insn *insn, stack_ptr regstack, rtx src1, rtx src2)
       k = temp_stack.top - (regno - FIRST_STACK_REG);
       j = temp_stack.top;
 
-      temp = temp_stack.reg[k];
-      temp_stack.reg[k] = temp_stack.reg[j];
-      temp_stack.reg[j] = temp;
+      std::swap (temp_stack.reg[j], temp_stack.reg[k]);
     }
 
   /* Place operand 2 next on the stack.  */
@@ -931,9 +923,7 @@ swap_to_top (rtx_insn *insn, stack_ptr regstack, rtx src1, rtx src2)
       k = temp_stack.top - (regno - FIRST_STACK_REG);
       j = temp_stack.top - 1;
 
-      temp = temp_stack.reg[k];
-      temp_stack.reg[k] = temp_stack.reg[j];
-      temp_stack.reg[j] = temp;
+      std::swap (temp_stack.reg[j], temp_stack.reg[k]);
     }
 
   change_stack (insn, regstack, &temp_stack, EMIT_BEFORE);
@@ -1100,7 +1090,7 @@ move_nan_for_stack_reg (rtx_insn *insn, stack_ptr regstack, rtx dest)
   rtx pat;
 
   dest = FP_MODE_REG (REGNO (dest), SFmode);
-  pat = gen_rtx_SET (VOIDmode, dest, not_a_num);
+  pat = gen_rtx_SET (dest, not_a_num);
   PATTERN (insn) = pat;
   INSN_CODE (insn) = -1;
 
@@ -1249,10 +1239,7 @@ compare_for_stack_reg (rtx_insn *insn, stack_ptr regstack, rtx pat_src)
 	   && get_hard_regnum (regstack, *src2) == FIRST_STACK_REG))
       && swap_rtx_condition (insn))
     {
-      rtx temp;
-      temp = XEXP (pat_src, 0);
-      XEXP (pat_src, 0) = XEXP (pat_src, 1);
-      XEXP (pat_src, 1) = temp;
+      std::swap (XEXP (pat_src, 0), XEXP (pat_src, 1));
 
       src1 = get_true_reg (&XEXP (pat_src, 0));
       src2 = get_true_reg (&XEXP (pat_src, 1));
@@ -1468,8 +1455,7 @@ subst_stack_regs_pat (rtx_insn *insn, stack_ptr regstack, rtx pat)
 	  case CALL:
 	    {
 	      int count;
-	      for (count = hard_regno_nregs[REGNO (*dest)][GET_MODE (*dest)];
-		   --count >= 0;)
+	      for (count = REG_NREGS (*dest); --count >= 0;)
 		{
 		  regstack->reg[++regstack->top] = REGNO (*dest) + count;
 		  SET_HARD_REG_BIT (regstack->reg_set, REGNO (*dest) + count);
@@ -1658,8 +1644,8 @@ subst_stack_regs_pat (rtx_insn *insn, stack_ptr regstack, rtx pat)
 	  case UNSPEC:
 	    switch (XINT (pat_src, 1))
 	      {
-	      case UNSPEC_STA:
 	      case UNSPEC_FIST:
+	      case UNSPEC_FIST_ATOMIC:
 
 	      case UNSPEC_FIST_FLOOR:
 	      case UNSPEC_FIST_CEIL:
@@ -2127,15 +2113,13 @@ subst_asm_stack_regs (rtx_insn *insn, stack_ptr regstack)
 	       it and swap it with whatever is already in I's place.
 	       K is where recog_data.operand[i] is now.  J is where it
 	       should be.  */
-	    int j, k, temp;
+	    int j, k;
 
 	    k = temp_stack.top - (regno - FIRST_STACK_REG);
 	    j = (temp_stack.top
 		 - (REGNO (recog_data.operand[i]) - FIRST_STACK_REG));
 
-	    temp = temp_stack.reg[k];
-	    temp_stack.reg[k] = temp_stack.reg[j];
-	    temp_stack.reg[j] = temp;
+	    std::swap (temp_stack.reg[j], temp_stack.reg[k]);
 	  }
       }
 
@@ -2425,15 +2409,15 @@ change_stack (rtx_insn *insn, stack_ptr old, stack_ptr new_stack,
       {
 	old->reg[++old->top] = i;
         SET_HARD_REG_BIT (old->reg_set, i);
-	emit_insn_before (gen_rtx_SET (VOIDmode,
-				       FP_MODE_REG (i, SFmode), not_a_num), insn);
+	emit_insn_before (gen_rtx_SET (FP_MODE_REG (i, SFmode), not_a_num),
+			  insn);
       }
 
   /* Pop any registers that are not needed in the new block.  */
 
   /* If the destination block's stack already has a specified layout
      and contains two or more registers, use a more intelligent algorithm
-     to pop registers that minimizes the number number of fxchs below.  */
+     to pop registers that minimizes the number of fxchs below.  */
   if (new_stack->top > 0)
     {
       bool slots[REG_STACK_SIZE];
@@ -2651,8 +2635,7 @@ convert_regs_entry (void)
 
 	    bi->stack_in.reg[++top] = reg;
 
-	    init = gen_rtx_SET (VOIDmode,
-				FP_MODE_REG (FIRST_STACK_REG, SFmode),
+	    init = gen_rtx_SET (FP_MODE_REG (FIRST_STACK_REG, SFmode),
 				not_a_num);
 	    insert_insn_on_edge (init, e);
 	    inserted = 1;
@@ -2679,7 +2662,7 @@ convert_regs_exit (void)
   if (retvalue)
     {
       value_reg_low = REGNO (retvalue);
-      value_reg_high = END_HARD_REGNO (retvalue) - 1;
+      value_reg_high = END_REGNO (retvalue) - 1;
     }
 
   output_stack = &BLOCK_INFO (EXIT_BLOCK_PTR_FOR_FN (cfun))->stack_in;
@@ -3020,7 +3003,7 @@ convert_regs_1 (basic_block block)
 	  if (dump_file)
 	    fprintf (dump_file, "Emitting insn initializing reg %d\n", reg);
 
-	  set = gen_rtx_SET (VOIDmode, FP_MODE_REG (reg, SFmode), not_a_num);
+	  set = gen_rtx_SET (FP_MODE_REG (reg, SFmode), not_a_num);
 	  insn = emit_insn_after (set, insn);
 	  control_flow_insn_deleted |= subst_stack_regs (insn, &regstack);
 	}
@@ -3230,7 +3213,7 @@ reg_to_stack (void)
   /* Create the replacement registers up front.  */
   for (i = FIRST_STACK_REG; i <= LAST_STACK_REG; i++)
     {
-      enum machine_mode mode;
+      machine_mode mode;
       for (mode = GET_CLASS_NARROWEST_MODE (MODE_FLOAT);
 	   mode != VOIDmode;
 	   mode = GET_MODE_WIDER_MODE (mode))

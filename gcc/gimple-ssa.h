@@ -1,6 +1,6 @@
 /* Header file for routines that straddle the border between GIMPLE and
    SSA in gimple.
-   Copyright (C) 2009-2014 Free Software Foundation, Inc.
+   Copyright (C) 2009-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -21,19 +21,30 @@ along with GCC; see the file COPYING3.  If not see
 #ifndef GCC_GIMPLE_SSA_H
 #define GCC_GIMPLE_SSA_H
 
-#include "hash-map.h"
-#include "tree-hasher.h"
 #include "tree-ssa-operands.h"
 
 /* This structure is used to map a gimple statement to a label,
    or list of labels to represent transaction restart.  */
 
-struct GTY(()) tm_restart_node {
+struct GTY((for_user)) tm_restart_node {
   gimple stmt;
   tree label_or_list;
 };
 
-struct ssa_name_hasher : ggc_hasher<tree>
+/* Hasher for tm_restart_node.  */
+
+struct tm_restart_hasher : ggc_ptr_hash<tm_restart_node>
+{
+  static hashval_t hash (tm_restart_node *n) { return htab_hash_pointer (n); }
+
+  static bool
+  equal (tm_restart_node *a, tm_restart_node *b)
+  {
+    return a == b;
+  }
+};
+
+struct ssa_name_hasher : ggc_ptr_hash<tree_node>
 {
   /* Hash a tree in a uid_decl_map.  */
 
@@ -101,7 +112,7 @@ struct GTY(()) gimple_df {
 
   /* Map gimple stmt to tree label (or list of labels) for transaction
      restart and abort.  */
-  htab_t GTY ((param_is (struct tm_restart_node))) tm_restart;
+  hash_table<tm_restart_hasher> *tm_restart;
 };
 
 

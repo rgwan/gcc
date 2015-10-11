@@ -1,5 +1,5 @@
 /* Pragma related interfaces.
-   Copyright (C) 1995-2014 Free Software Foundation, Inc.
+   Copyright (C) 1995-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -24,9 +24,18 @@ along with GCC; see the file COPYING3.  If not see
 
 /* Pragma identifiers built in to the front end parsers.  Identifiers
    for ancillary handlers will follow these.  */
-typedef enum pragma_kind {
+enum pragma_kind {
   PRAGMA_NONE = 0,
 
+  PRAGMA_OACC_CACHE,
+  PRAGMA_OACC_DATA,
+  PRAGMA_OACC_ENTER_DATA,
+  PRAGMA_OACC_EXIT_DATA,
+  PRAGMA_OACC_KERNELS,
+  PRAGMA_OACC_LOOP,
+  PRAGMA_OACC_PARALLEL,
+  PRAGMA_OACC_UPDATE,
+  PRAGMA_OACC_WAIT,
   PRAGMA_OMP_ATOMIC,
   PRAGMA_OMP_BARRIER,
   PRAGMA_OMP_CANCEL,
@@ -62,12 +71,12 @@ typedef enum pragma_kind {
   PRAGMA_IVDEP,
 
   PRAGMA_FIRST_EXTERNAL
-} pragma_kind;
+};
 
 
-/* All clauses defined by OpenMP 2.5, 3.0, 3.1 and 4.0.
+/* All clauses defined by OpenACC 2.0, and OpenMP 2.5, 3.0, 3.1, and 4.0.
    Used internally by both C and C++ parsers.  */
-typedef enum pragma_omp_clause {
+enum pragma_omp_clause {
   PRAGMA_OMP_CLAUSE_NONE = 0,
 
   PRAGMA_OMP_CLAUSE_ALIGNED,
@@ -118,8 +127,39 @@ typedef enum pragma_omp_clause {
   PRAGMA_CILK_CLAUSE_FIRSTPRIVATE = PRAGMA_OMP_CLAUSE_FIRSTPRIVATE,
   PRAGMA_CILK_CLAUSE_LASTPRIVATE = PRAGMA_OMP_CLAUSE_LASTPRIVATE,
   PRAGMA_CILK_CLAUSE_REDUCTION = PRAGMA_OMP_CLAUSE_REDUCTION,
-  PRAGMA_CILK_CLAUSE_UNIFORM = PRAGMA_OMP_CLAUSE_UNIFORM
-} pragma_omp_clause;
+  PRAGMA_CILK_CLAUSE_UNIFORM = PRAGMA_OMP_CLAUSE_UNIFORM,
+
+  /* Clauses for OpenACC.  */
+  PRAGMA_OACC_CLAUSE_ASYNC = PRAGMA_CILK_CLAUSE_VECTORLENGTH + 1,
+  PRAGMA_OACC_CLAUSE_AUTO,
+  PRAGMA_OACC_CLAUSE_COPY,
+  PRAGMA_OACC_CLAUSE_COPYOUT,
+  PRAGMA_OACC_CLAUSE_CREATE,
+  PRAGMA_OACC_CLAUSE_DELETE,
+  PRAGMA_OACC_CLAUSE_DEVICEPTR,
+  PRAGMA_OACC_CLAUSE_GANG,
+  PRAGMA_OACC_CLAUSE_HOST,
+  PRAGMA_OACC_CLAUSE_NUM_GANGS,
+  PRAGMA_OACC_CLAUSE_NUM_WORKERS,
+  PRAGMA_OACC_CLAUSE_PRESENT,
+  PRAGMA_OACC_CLAUSE_PRESENT_OR_COPY,
+  PRAGMA_OACC_CLAUSE_PRESENT_OR_COPYIN,
+  PRAGMA_OACC_CLAUSE_PRESENT_OR_COPYOUT,
+  PRAGMA_OACC_CLAUSE_PRESENT_OR_CREATE,
+  PRAGMA_OACC_CLAUSE_SELF,
+  PRAGMA_OACC_CLAUSE_SEQ,
+  PRAGMA_OACC_CLAUSE_VECTOR,
+  PRAGMA_OACC_CLAUSE_VECTOR_LENGTH,
+  PRAGMA_OACC_CLAUSE_WAIT,
+  PRAGMA_OACC_CLAUSE_WORKER,
+  PRAGMA_OACC_CLAUSE_COLLAPSE = PRAGMA_OMP_CLAUSE_COLLAPSE,
+  PRAGMA_OACC_CLAUSE_COPYIN = PRAGMA_OMP_CLAUSE_COPYIN,
+  PRAGMA_OACC_CLAUSE_DEVICE = PRAGMA_OMP_CLAUSE_DEVICE,
+  PRAGMA_OACC_CLAUSE_FIRSTPRIVATE = PRAGMA_OMP_CLAUSE_FIRSTPRIVATE,
+  PRAGMA_OACC_CLAUSE_IF = PRAGMA_OMP_CLAUSE_IF,
+  PRAGMA_OACC_CLAUSE_PRIVATE = PRAGMA_OMP_CLAUSE_PRIVATE,
+  PRAGMA_OACC_CLAUSE_REDUCTION = PRAGMA_OMP_CLAUSE_REDUCTION
+};
 
 extern struct cpp_reader* parse_in;
 
@@ -143,7 +183,7 @@ union gen_pragma_handler {
   pragma_handler_2arg handler_2arg;
 };
 /* Internally used to keep the data of the handler.  */
-struct internal_pragma_handler_d {
+struct internal_pragma_handler {
   union gen_pragma_handler handler;
   /* Permits to know if handler is a pragma_handler_1arg (extra_data is false)
      or a pragma_handler_2arg (extra_data is true).  */
@@ -151,7 +191,6 @@ struct internal_pragma_handler_d {
   /* A data field which can be used when extra_data is true.  */
   void * data;
 };
-typedef struct internal_pragma_handler_d internal_pragma_handler;
 
 extern void c_register_pragma (const char *space, const char *name,
                                pragma_handler_1arg handler);

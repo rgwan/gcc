@@ -1,5 +1,5 @@
 /* Rtl-level induction variable analysis.
-   Copyright (C) 2004-2014 Free Software Foundation, Inc.
+   Copyright (C) 2004-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -50,17 +50,24 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "tree.h"
 #include "rtl.h"
-#include "hard-reg-set.h"
-#include "obstack.h"
-#include "basic-block.h"
+#include "df.h"
 #include "cfgloop.h"
+#include "flags.h"
+#include "alias.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
 #include "intl.h"
 #include "diagnostic-core.h"
-#include "df.h"
-#include "hash-table.h"
 #include "dumpfile.h"
 #include "rtl-iter.h"
 
@@ -109,18 +116,17 @@ static struct loop *current_loop;
 
 /* Hashtable helper.  */
 
-struct biv_entry_hasher : typed_free_remove <biv_entry>
+struct biv_entry_hasher : free_ptr_hash <biv_entry>
 {
-  typedef biv_entry value_type;
-  typedef rtx_def compare_type;
-  static inline hashval_t hash (const value_type *);
-  static inline bool equal (const value_type *, const compare_type *);
+  typedef rtx_def *compare_type;
+  static inline hashval_t hash (const biv_entry *);
+  static inline bool equal (const biv_entry *, const rtx_def *);
 };
 
 /* Returns hash value for biv B.  */
 
 inline hashval_t
-biv_entry_hasher::hash (const value_type *b)
+biv_entry_hasher::hash (const biv_entry *b)
 {
   return b->regno;
 }
@@ -128,7 +134,7 @@ biv_entry_hasher::hash (const value_type *b)
 /* Compares biv B and register R.  */
 
 inline bool
-biv_entry_hasher::equal (const value_type *b, const compare_type *r)
+biv_entry_hasher::equal (const biv_entry *b, const rtx_def *r)
 {
   return b->regno == REGNO (r);
 }
@@ -197,17 +203,6 @@ dump_iv_info (FILE *file, struct rtx_iv *iv)
     }
   if (iv->first_special)
     fprintf (file, " (first special)");
-}
-
-/* Generates a subreg to get the least significant part of EXPR (in mode
-   INNER_MODE) to OUTER_MODE.  */
-
-rtx
-lowpart_subreg (enum machine_mode outer_mode, rtx expr,
-		enum machine_mode inner_mode)
-{
-  return simplify_gen_subreg (outer_mode, expr, inner_mode,
-			      subreg_lowpart_offset (outer_mode, inner_mode));
 }
 
 static void
@@ -398,7 +393,7 @@ iv_get_reaching_def (rtx_insn *insn, rtx reg, df_ref *def)
    consistency with other iv manipulation functions that may fail).  */
 
 static bool
-iv_constant (struct rtx_iv *iv, rtx cst, enum machine_mode mode)
+iv_constant (struct rtx_iv *iv, rtx cst, machine_mode mode)
 {
   if (mode == VOIDmode)
     mode = GET_MODE (cst);
@@ -418,7 +413,7 @@ iv_constant (struct rtx_iv *iv, rtx cst, enum machine_mode mode)
 /* Evaluates application of subreg to MODE on IV.  */
 
 static bool
-iv_subreg (struct rtx_iv *iv, enum machine_mode mode)
+iv_subreg (struct rtx_iv *iv, machine_mode mode)
 {
   /* If iv is invariant, just calculate the new value.  */
   if (iv->step == const0_rtx
@@ -460,7 +455,7 @@ iv_subreg (struct rtx_iv *iv, enum machine_mode mode)
 /* Evaluates application of EXTEND to MODE on IV.  */
 
 static bool
-iv_extend (struct rtx_iv *iv, enum iv_extend_code extend, enum machine_mode mode)
+iv_extend (struct rtx_iv *iv, enum iv_extend_code extend, machine_mode mode)
 {
   /* If iv is invariant, just calculate the new value.  */
   if (iv->step == const0_rtx
@@ -523,7 +518,7 @@ iv_neg (struct rtx_iv *iv)
 static bool
 iv_add (struct rtx_iv *iv0, struct rtx_iv *iv1, enum rtx_code op)
 {
-  enum machine_mode mode;
+  machine_mode mode;
   rtx arg;
 
   /* Extend the constant to extend_mode of the other operand if necessary.  */
@@ -593,7 +588,7 @@ iv_add (struct rtx_iv *iv0, struct rtx_iv *iv1, enum rtx_code op)
 static bool
 iv_mult (struct rtx_iv *iv, rtx mby)
 {
-  enum machine_mode mode = iv->extend_mode;
+  machine_mode mode = iv->extend_mode;
 
   if (GET_MODE (mby) != VOIDmode
       && GET_MODE (mby) != mode)
@@ -618,7 +613,7 @@ iv_mult (struct rtx_iv *iv, rtx mby)
 static bool
 iv_shift (struct rtx_iv *iv, rtx mby)
 {
-  enum machine_mode mode = iv->extend_mode;
+  machine_mode mode = iv->extend_mode;
 
   if (GET_MODE (mby) != VOIDmode
       && GET_MODE (mby) != mode)
@@ -644,12 +639,12 @@ iv_shift (struct rtx_iv *iv, rtx mby)
 
 static bool
 get_biv_step_1 (df_ref def, rtx reg,
-		rtx *inner_step, enum machine_mode *inner_mode,
-		enum iv_extend_code *extend, enum machine_mode outer_mode,
+		rtx *inner_step, machine_mode *inner_mode,
+		enum iv_extend_code *extend, machine_mode outer_mode,
 		rtx *outer_step)
 {
   rtx set, rhs, op0 = NULL_RTX, op1 = NULL_RTX;
-  rtx next, nextr, tmp;
+  rtx next, nextr;
   enum rtx_code code;
   rtx_insn *insn = DF_REF_INSN (def);
   df_ref next_def;
@@ -679,9 +674,7 @@ get_biv_step_1 (df_ref def, rtx reg,
       op1 = XEXP (rhs, 1);
 
       if (code == PLUS && CONSTANT_P (op0))
-	{
-	  tmp = op0; op0 = op1; op1 = tmp;
-	}
+	std::swap (op0, op1);
 
       if (!simple_reg_p (op0)
 	  || !CONSTANT_P (op1))
@@ -756,7 +749,7 @@ get_biv_step_1 (df_ref def, rtx reg,
 
   if (GET_CODE (next) == SUBREG)
     {
-      enum machine_mode amode = GET_MODE (next);
+      machine_mode amode = GET_MODE (next);
 
       if (GET_MODE_SIZE (amode) > GET_MODE_SIZE (*inner_mode))
 	return false;
@@ -811,8 +804,8 @@ get_biv_step_1 (df_ref def, rtx reg,
 
 static bool
 get_biv_step (df_ref last_def, rtx reg, rtx *inner_step,
-	      enum machine_mode *inner_mode, enum iv_extend_code *extend,
-	      enum machine_mode *outer_mode, rtx *outer_step)
+	      machine_mode *inner_mode, enum iv_extend_code *extend,
+	      machine_mode *outer_mode, rtx *outer_step)
 {
   *outer_mode = GET_MODE (reg);
 
@@ -873,7 +866,7 @@ static bool
 iv_analyze_biv (rtx def, struct rtx_iv *iv)
 {
   rtx inner_step, outer_step;
-  enum machine_mode inner_mode, outer_mode;
+  machine_mode inner_mode, outer_mode;
   enum iv_extend_code extend;
   df_ref last_def;
 
@@ -947,14 +940,14 @@ iv_analyze_biv (rtx def, struct rtx_iv *iv)
    The mode of the induction variable is MODE.  */
 
 bool
-iv_analyze_expr (rtx_insn *insn, rtx rhs, enum machine_mode mode,
+iv_analyze_expr (rtx_insn *insn, rtx rhs, machine_mode mode,
 		 struct rtx_iv *iv)
 {
-  rtx mby = NULL_RTX, tmp;
+  rtx mby = NULL_RTX;
   rtx op0 = NULL_RTX, op1 = NULL_RTX;
   struct rtx_iv iv0, iv1;
   enum rtx_code code = GET_CODE (rhs);
-  enum machine_mode omode = mode;
+  machine_mode omode = mode;
 
   iv->mode = VOIDmode;
   iv->base = NULL_RTX;
@@ -1001,11 +994,7 @@ iv_analyze_expr (rtx_insn *insn, rtx rhs, enum machine_mode mode,
       op0 = XEXP (rhs, 0);
       mby = XEXP (rhs, 1);
       if (!CONSTANT_P (mby))
-	{
-	  tmp = op0;
-	  op0 = mby;
-	  mby = tmp;
-	}
+	std::swap (op0, mby);
       if (!CONSTANT_P (mby))
 	return false;
       break;
@@ -1517,8 +1506,8 @@ replace_in_expr (rtx *expr, rtx dest, rtx src)
 static bool
 implies_p (rtx a, rtx b)
 {
-  rtx op0, op1, opb0, opb1, r;
-  enum machine_mode mode;
+  rtx op0, op1, opb0, opb1;
+  machine_mode mode;
 
   if (rtx_equal_p (a, b))
     return true;
@@ -1532,7 +1521,7 @@ implies_p (rtx a, rtx b)
 	  || (GET_CODE (op0) == SUBREG
 	      && REG_P (SUBREG_REG (op0))))
 	{
-	  r = simplify_replace_rtx (b, op0, op1);
+	  rtx r = simplify_replace_rtx (b, op0, op1);
 	  if (r == const_true_rtx)
 	    return true;
 	}
@@ -1541,7 +1530,7 @@ implies_p (rtx a, rtx b)
 	  || (GET_CODE (op1) == SUBREG
 	      && REG_P (SUBREG_REG (op1))))
 	{
-	  r = simplify_replace_rtx (b, op1, op0);
+	  rtx r = simplify_replace_rtx (b, op1, op0);
 	  if (r == const_true_rtx)
 	    return true;
 	}
@@ -1577,18 +1566,10 @@ implies_p (rtx a, rtx b)
     {
 
       if (GET_CODE (a) == GT)
-	{
-	  r = op0;
-	  op0 = op1;
-	  op1 = r;
-	}
+	std::swap (op0, op1);
 
       if (GET_CODE (b) == GE)
-	{
-	  r = opb0;
-	  opb0 = opb1;
-	  opb1 = r;
-	}
+	std::swap (opb0, opb1);
 
       if (SCALAR_INT_MODE_P (mode)
 	  && rtx_equal_p (op1, opb1)
@@ -1680,10 +1661,9 @@ implies_p (rtx a, rtx b)
 rtx
 canon_condition (rtx cond)
 {
-  rtx tem;
   rtx op0, op1;
   enum rtx_code code;
-  enum machine_mode mode;
+  machine_mode mode;
 
   code = GET_CODE (cond);
   op0 = XEXP (cond, 0);
@@ -1692,9 +1672,7 @@ canon_condition (rtx cond)
   if (swap_commutative_operands_p (op0, op1))
     {
       code = swap_condition (code);
-      tem = op0;
-      op0 = op1;
-      op1 = tem;
+      std::swap (op0, op1);
     }
 
   mode = GET_MODE (op0);
@@ -1702,39 +1680,42 @@ canon_condition (rtx cond)
     mode = GET_MODE (op1);
   gcc_assert (mode != VOIDmode);
 
-  if (CONST_INT_P (op1)
-      && GET_MODE_CLASS (mode) != MODE_CC
-      && GET_MODE_BITSIZE (mode) <= HOST_BITS_PER_WIDE_INT)
+  if (CONST_SCALAR_INT_P (op1) && GET_MODE_CLASS (mode) != MODE_CC)
     {
-      HOST_WIDE_INT const_val = INTVAL (op1);
-      unsigned HOST_WIDE_INT uconst_val = const_val;
-      unsigned HOST_WIDE_INT max_val
-	= (unsigned HOST_WIDE_INT) GET_MODE_MASK (mode);
+      rtx_mode_t const_val (op1, mode);
 
       switch (code)
 	{
 	case LE:
-	  if ((unsigned HOST_WIDE_INT) const_val != max_val >> 1)
-	    code = LT, op1 = gen_int_mode (const_val + 1, GET_MODE (op0));
+	  if (wi::ne_p (const_val, wi::max_value (mode, SIGNED)))
+	    {
+	      code = LT;
+	      op1 = immed_wide_int_const (wi::add (const_val, 1),  mode);
+	    }
 	  break;
 
-	/* When cross-compiling, const_val might be sign-extended from
-	   BITS_PER_WORD to HOST_BITS_PER_WIDE_INT */
 	case GE:
-	  if ((HOST_WIDE_INT) (const_val & max_val)
-	      != (((HOST_WIDE_INT) 1
-		   << (GET_MODE_BITSIZE (GET_MODE (op0)) - 1))))
-	    code = GT, op1 = gen_int_mode (const_val - 1, mode);
+	  if (wi::ne_p (const_val, wi::min_value (mode, SIGNED)))
+	    {
+	      code = GT;
+	      op1 = immed_wide_int_const (wi::sub (const_val, 1), mode);
+	    }
 	  break;
 
 	case LEU:
-	  if (uconst_val < max_val)
-	    code = LTU, op1 = gen_int_mode (uconst_val + 1, mode);
+	  if (wi::ne_p (const_val, -1))
+	    {
+	      code = LTU;
+	      op1 = immed_wide_int_const (wi::add (const_val, 1), mode);
+	    }
 	  break;
 
 	case GEU:
-	  if (uconst_val != 0)
-	    code = GTU, op1 = gen_int_mode (uconst_val - 1, mode);
+	  if (wi::ne_p (const_val, 0))
+	    {
+	      code = GTU;
+	      op1 = immed_wide_int_const (wi::sub (const_val, 1), mode);
+	    }
 	  break;
 
 	default:
@@ -2026,7 +2007,7 @@ simplify_using_initial_values (struct loop *loop, enum rtx_code op, rtx *expr)
 
 	      for (pnote = &cond_list; *pnote; pnote = pnote_next)
 		{
-		  rtx note = *pnote;
+		  rtx_expr_list *note = *pnote;
 		  rtx old_cond = XEXP (note, 0);
 
 		  pnote_next = (rtx_expr_list **)&XEXP (note, 1);
@@ -2060,7 +2041,7 @@ simplify_using_initial_values (struct loop *loop, enum rtx_code op, rtx *expr)
 	      /* Likewise for the conditions.  */
 	      for (pnote = &cond_list; *pnote; pnote = pnote_next)
 		{
-		  rtx note = *pnote;
+		  rtx_expr_list *note = *pnote;
 		  rtx old_cond = XEXP (note, 0);
 
 		  pnote_next = (rtx_expr_list **)&XEXP (note, 1);
@@ -2107,7 +2088,7 @@ simplify_using_initial_values (struct loop *loop, enum rtx_code op, rtx *expr)
    is SIGNED_P to DESC.  */
 
 static void
-shorten_into_mode (struct rtx_iv *iv, enum machine_mode mode,
+shorten_into_mode (struct rtx_iv *iv, machine_mode mode,
 		   enum rtx_code cond, bool signed_p, struct niter_desc *desc)
 {
   rtx mmin, mmax, cond_over, cond_under;
@@ -2169,7 +2150,7 @@ static bool
 canonicalize_iv_subregs (struct rtx_iv *iv0, struct rtx_iv *iv1,
 			 enum rtx_code cond, struct niter_desc *desc)
 {
-  enum machine_mode comp_mode;
+  machine_mode comp_mode;
   bool signed_p;
 
   /* If the ivs behave specially in the first iteration, or are
@@ -2302,7 +2283,7 @@ determine_max_iter (struct loop *loop, struct niter_desc *desc, rtx old_niter)
     }
 
   get_mode_bounds (desc->mode, desc->signed_p, desc->mode, &mmin, &mmax);
-  nmax = INTVAL (mmax) - INTVAL (mmin);
+  nmax = UINTVAL (mmax) - UINTVAL (mmin);
 
   if (GET_CODE (niter) == UDIV)
     {
@@ -2330,7 +2311,7 @@ determine_max_iter (struct loop *loop, struct niter_desc *desc, rtx old_niter)
   if (andmax)
     nmax = MIN (nmax, andmax);
   if (dump_file)
-    fprintf (dump_file, ";; Determined upper bound %"PRId64".\n",
+    fprintf (dump_file, ";; Determined upper bound %" PRId64".\n",
 	     nmax);
   return nmax;
 }
@@ -2344,13 +2325,13 @@ iv_number_of_iterations (struct loop *loop, rtx_insn *insn, rtx condition,
 			 struct niter_desc *desc)
 {
   rtx op0, op1, delta, step, bound, may_xform, tmp, tmp0, tmp1;
-  struct rtx_iv iv0, iv1, tmp_iv;
+  struct rtx_iv iv0, iv1;
   rtx assumption, may_not_xform;
   enum rtx_code cond;
-  enum machine_mode mode, comp_mode;
+  machine_mode mode, comp_mode;
   rtx mmin, mmax, mode_mmin, mode_mmax;
-  uint64_t s, size, d, inv, max;
-  int64_t up, down, inc, step_val;
+  uint64_t s, size, d, inv, max, up, down;
+  int64_t inc, step_val;
   int was_sharp = false;
   rtx old_niter;
   bool step_is_pow2;
@@ -2407,7 +2388,7 @@ iv_number_of_iterations (struct loop *loop, rtx_insn *insn, rtx condition,
       case GT:
       case GEU:
       case GTU:
-	tmp_iv = iv0; iv0 = iv1; iv1 = tmp_iv;
+	std::swap (iv0, iv1);
 	cond = swap_condition (cond);
 	break;
       case NE:

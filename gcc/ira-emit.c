@@ -1,5 +1,5 @@
 /* Integrated Register Allocator.  Changing code and generating moves.
-   Copyright (C) 2006-2014 Free Software Foundation, Inc.
+   Copyright (C) 2006-2015 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -68,21 +68,32 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
-#include "regs.h"
+#include "backend.h"
+#include "predict.h"
+#include "tree.h"
 #include "rtl.h"
+#include "df.h"
+#include "regs.h"
 #include "tm_p.h"
 #include "target.h"
 #include "flags.h"
-#include "obstack.h"
-#include "bitmap.h"
-#include "hard-reg-set.h"
-#include "basic-block.h"
+#include "cfgrtl.h"
+#include "cfgbuild.h"
+#include "alias.h"
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
-#include "recog.h"
 #include "params.h"
 #include "reload.h"
-#include "df.h"
+#include "cfgloop.h"
+#include "ira.h"
+#include "alloc-pool.h"
 #include "ira-int.h"
 
 
@@ -913,7 +924,7 @@ emit_move_list (move_t list, int freq)
   int to_regno, from_regno, cost, regno;
   rtx_insn *result, *insn;
   rtx set;
-  enum machine_mode mode;
+  machine_mode mode;
   enum reg_class aclass;
 
   grow_reg_equivs ();

@@ -76,6 +76,9 @@ package body Prj is
                           All_Upper_Case => All_Upper_Case_Image'Access,
                           Mixed_Case     => Mixed_Case_Image'Access);
 
+   package Name_Id_Set is
+      new Ada.Containers.Ordered_Sets (Element_Type => Name_Id);
+
    procedure Free (Project : in out Project_Id);
    --  Free memory allocated for Project
 
@@ -589,9 +592,6 @@ package body Prj is
          In_Aggregate_Lib      : Boolean;
          From_Encapsulated_Lib : Boolean)
       is
-         package Name_Id_Set is
-           new Ada.Containers.Ordered_Sets (Element_Type => Name_Id);
-
          Seen_Name : Name_Id_Set.Set;
          --  This set is needed to ensure that we do not handle the same
          --  project twice in the context of aggregate libraries.
@@ -1934,7 +1934,8 @@ package body Prj is
          Require_Obj_Dirs           => Require_Obj_Dirs,
          Allow_Invalid_External     => Allow_Invalid_External,
          Missing_Source_Files       => Missing_Source_Files,
-         Ignore_Missing_With        => Ignore_Missing_With);
+         Ignore_Missing_With        => Ignore_Missing_With,
+         Incomplete_Withs           => False);
    end Create_Flags;
 
    ------------
@@ -2146,6 +2147,18 @@ package body Prj is
       Recursive_Process
         (Root_Project, Root_Tree, Project_Context'(False, False));
    end For_Project_And_Aggregated_Context;
+
+   -----------------------------
+   -- Set_Ignore_Missing_With --
+   -----------------------------
+
+   procedure Set_Ignore_Missing_With
+     (Flags : in out Processing_Flags;
+      Value : Boolean)
+   is
+   begin
+      Flags.Ignore_Missing_With := Value;
+   end Set_Ignore_Missing_With;
 
 --  Package initialization for Prj
 

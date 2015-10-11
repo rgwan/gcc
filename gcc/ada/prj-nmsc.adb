@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 2000-2014, Free Software Foundation, Inc.         --
+--          Copyright (C) 2000-2015, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -580,7 +580,7 @@ package body Prj.Nmsc is
          Canonical_Case_File_Name (Suf);
 
          --  The file name must end with the suffix (which is not an extension)
-         --  For instance a suffix "configure.in" must match a file with the
+         --  For instance a suffix "configure.ac" must match a file with the
          --  same name. To avoid dummy cases, though, a suffix starting with
          --  '.' requires a file that is at least one character longer ('.cpp'
          --  should not match a file with the same name).
@@ -1803,7 +1803,10 @@ package body Prj.Nmsc is
                   Lang_Index := Get_Language_From_Name
                     (Project, Get_Name_String (Element.Index));
 
-                  if Lang_Index /= No_Language_Index then
+                  if Lang_Index /= No_Language_Index
+                    and then Element.Value.Kind = Single
+                    and then Element.Value.Value /= No_Name
+                  then
                      case Current_Array.Name is
                         when Name_Spec_Suffix | Name_Specification_Suffix =>
 
@@ -2572,11 +2575,12 @@ package body Prj.Nmsc is
 
          if Data.Flags.Compiler_Driver_Mandatory
            and then Lang_Index.Config.Compiler_Driver = No_File
+           and then not Project.Externally_Built
          then
             Error_Msg_Name_1 := Lang_Index.Display_Name;
             Error_Msg
               (Data.Flags,
-               "?no compiler specified for language %%" &
+               "?\no compiler specified for language %%" &
                  ", ignoring all its sources",
                No_Location, Project);
 
@@ -2603,7 +2607,7 @@ package body Prj.Nmsc is
             if Lang_Index.Config.Naming_Data.Spec_Suffix = No_File then
                Error_Msg
                  (Data.Flags,
-                  "Spec_Suffix not specified for " &
+                  "\Spec_Suffix not specified for " &
                   Get_Name_String (Lang_Index.Name),
                   No_Location, Project);
             end if;
@@ -2611,7 +2615,7 @@ package body Prj.Nmsc is
             if Lang_Index.Config.Naming_Data.Body_Suffix = No_File then
                Error_Msg
                  (Data.Flags,
-                  "Body_Suffix not specified for " &
+                  "\Body_Suffix not specified for " &
                   Get_Name_String (Lang_Index.Name),
                   No_Location, Project);
             end if;
@@ -2629,7 +2633,7 @@ package body Prj.Nmsc is
                Error_Msg_Name_1 := Lang_Index.Display_Name;
                Error_Msg
                  (Data.Flags,
-                  "no suffixes specified for %%",
+                  "\no suffixes specified for %%",
                   No_Location, Project);
             end if;
          end if;
@@ -3769,7 +3773,7 @@ package body Prj.Nmsc is
                if Switches /= No_Array_Element then
                   Error_Msg
                     (Data.Flags,
-                     "?Linker switches not taken into account in library " &
+                     "?\Linker switches not taken into account in library " &
                      "projects",
                      No_Location, Project);
                end if;
@@ -4286,7 +4290,9 @@ package body Prj.Nmsc is
                   Shared                  => Shared);
             end if;
 
-            if Suffix /= Nil_Variable_Value then
+            if Suffix /= Nil_Variable_Value
+              and then Suffix.Value /= No_Name
+            then
                Lang_Id.Config.Naming_Data.Spec_Suffix :=
                    File_Name_Type (Suffix.Value);
 
@@ -4319,7 +4325,9 @@ package body Prj.Nmsc is
                     Shared                  => Shared);
             end if;
 
-            if Suffix /= Nil_Variable_Value then
+            if Suffix /= Nil_Variable_Value
+              and then Suffix.Value /= No_Name
+            then
                Lang_Id.Config.Naming_Data.Body_Suffix :=
                  File_Name_Type (Suffix.Value);
 
@@ -4711,7 +4719,7 @@ package body Prj.Nmsc is
          then
             Error_Msg
               (Data.Flags,
-               "Library_Standalone valid only if Library_Interface is set",
+               "Library_Standalone valid only if library has Ada interfaces",
                Lib_Standalone.Location, Project);
          end if;
 
@@ -5581,7 +5589,9 @@ package body Prj.Nmsc is
             end if;
          end if;
 
-      elsif not No_Sources and then Subdirs /= null then
+      elsif not No_Sources
+        and then (Subdirs /= null or else Build_Tree_Dir /= null)
+      then
          Name_Len := 1;
          Name_Buffer (1) := '.';
          Locate_Directory
@@ -6196,7 +6206,44 @@ package body Prj.Nmsc is
       The_Name        : File_Name_Type;
 
    begin
-      Get_Name_String (Name);
+      --  Check if we have a root-object dir specified, if so relocate all
+      --  artefact directories to it.
+
+      if Build_Tree_Dir /= null
+        and then Create /= ""
+        and then not Is_Absolute_Path (Get_Name_String (Name))
+      then
+         Name_Len := 0;
+         Add_Str_To_Name_Buffer (Build_Tree_Dir.all);
+
+         if The_Parent_Last - The_Parent'First  + 1 < Root_Dir'Length then
+            Err_Vars.Error_Msg_File_1 := Name;
+            Error_Or_Warning
+              (Data.Flags, Error,
+               "{ cannot relocate deeper than " & Create & " directory",
+               No_Location, Project);
+         end if;
+
+         Add_Str_To_Name_Buffer
+           (Relative_Path
+              (The_Parent (The_Parent'First .. The_Parent_Last),
+               Root_Dir.all));
+         Add_Str_To_Name_Buffer (Get_Name_String (Name));
+
+      else
+         if Build_Tree_Dir /= null and then Create /= "" then
+
+            --  Issue a warning that we cannot relocate absolute obj dir
+
+            Err_Vars.Error_Msg_File_1 := Name;
+            Error_Or_Warning
+              (Data.Flags, Warning,
+               "{ cannot relocate absolute object directory",
+               No_Location, Project);
+         end if;
+
+         Get_Name_String (Name);
+      end if;
 
       --  Add Subdirs.all if it is a directory that may be created and
       --  Subdirs is not null;
@@ -6792,7 +6839,7 @@ package body Prj.Nmsc is
                         Error_Msg_Name_2 := Source.Unit.Name;
                         Error_Or_Warning
                           (Data.Flags, Data.Flags.Missing_Source_Files,
-                           "source file %% for unit %% not found",
+                           "\source file %% for unit %% not found",
                            No_Location, Project.Project);
                      end if;
                   end if;
@@ -7788,7 +7835,7 @@ package body Prj.Nmsc is
             Error_Msg_File_1 := Source.File;
             Error_Msg
               (Data.Flags,
-               "{ cannot be both excluded and an exception file name",
+               "\{ cannot be both excluded and an exception file name",
                No_Location, Project.Project);
          end if;
 
@@ -7935,13 +7982,15 @@ package body Prj.Nmsc is
          if Source /= No_Source
            and then Source.Replaced_By = No_Source
            and then Source.Path /= Src.Path
+           and then Source.Index = 0
+           and then Src.Index = 0
            and then Is_Extending (Src.Project, Source.Project)
          then
             Error_Msg_File_1 := Src.File;
             Error_Msg_File_2 := Source.File;
             Error_Msg
               (Data.Flags,
-               "{ and { have the same object file name",
+               "\{ and { have the same object file name",
                No_Location, Project.Project);
 
          else

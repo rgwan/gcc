@@ -1,5 +1,5 @@
 ;; Predicate definitions for Xtensa.
-;; Copyright (C) 2005-2014 Free Software Foundation, Inc.
+;; Copyright (C) 2005-2015 Free Software Foundation, Inc.
 ;;
 ;; This file is part of GCC.
 ;;
@@ -142,7 +142,8 @@
 	       (match_test "GET_MODE_CLASS (mode) == MODE_INT
 			    && xtensa_simm12b (INTVAL (op))"))
 	  (and (match_code "const_int,const_double,const,symbol_ref,label_ref")
-	       (match_test "TARGET_CONST16 && CONSTANT_P (op)
+	       (match_test "(TARGET_CONST16 || TARGET_AUTO_LITPOOLS)
+			    && CONSTANT_P (op)
 			    && GET_MODE_SIZE (mode) % UNITS_PER_WORD == 0")))))
 
 ;; Accept the floating point constant 1 in the appropriate mode.

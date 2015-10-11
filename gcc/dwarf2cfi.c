@@ -1,5 +1,5 @@
 /* Dwarf2 Call Frame Information helper routines.
-   Copyright (C) 1992-2014 Free Software Foundation, Inc.
+   Copyright (C) 1992-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -24,27 +24,28 @@ along with GCC; see the file COPYING3.  If not see
 #include "version.h"
 #include "flags.h"
 #include "rtl.h"
+#include "alias.h"
 #include "tree.h"
 #include "stor-layout.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "hard-reg-set.h"
-#include "input.h"
 #include "function.h"
-#include "basic-block.h"
+#include "cfgbuild.h"
 #include "dwarf2.h"
 #include "dwarf2out.h"
 #include "dwarf2asm.h"
-#include "ggc.h"
-#include "hash-table.h"
 #include "tm_p.h"
 #include "target.h"
 #include "common/common-target.h"
 #include "tree-pass.h"
 
 #include "except.h"		/* expand_builtin_dwarf_sp_column */
+#include "insn-config.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"		/* init_return_column_size */
 #include "regs.h"		/* expand_builtin_init_dwarf_reg_sizes */
 #include "output.h"		/* asm_out_file */
@@ -67,7 +68,7 @@ along with GCC; see the file COPYING3.  If not see
 #define MAX_ARTIFICIAL_LABEL_BYTES	30
 
 /* A collected description of an entire row of the abstract CFI table.  */
-typedef struct GTY(()) dw_cfi_row_struct
+struct GTY(()) dw_cfi_row
 {
   /* The expression that computes the CFA, expressed in two different ways.
      The CFA member for the simple cases, and the full CFI expression for
@@ -77,13 +78,13 @@ typedef struct GTY(()) dw_cfi_row_struct
 
   /* The expressions for any register column that is saved.  */
   cfi_vec reg_save;
-} dw_cfi_row;
+};
 
 /* The caller's ORIG_REG is saved in SAVED_IN_REG.  */
-typedef struct GTY(()) reg_saved_in_data_struct {
+struct GTY(()) reg_saved_in_data {
   rtx orig_reg;
   rtx saved_in_reg;
-} reg_saved_in_data;
+};
 
 
 /* Since we no longer have a proper CFG, we're going to create a facsimile
@@ -103,7 +104,7 @@ typedef struct GTY(()) reg_saved_in_data_struct {
    All save points are present in the TRACE_INDEX hash, mapping the insn
    starting a trace to the dw_trace_info describing the trace.  */
 
-typedef struct
+struct dw_trace_info
 {
   /* The insn that begins the trace.  */
   rtx_insn *head;
@@ -156,7 +157,7 @@ typedef struct
 
   /* True if we've seen different values incoming to beg_true_args_size.  */
   bool args_size_undefined;
-} dw_trace_info;
+};
 
 
 typedef dw_trace_info *dw_trace_info_ref;
@@ -164,22 +165,20 @@ typedef dw_trace_info *dw_trace_info_ref;
 
 /* Hashtable helpers.  */
 
-struct trace_info_hasher : typed_noop_remove <dw_trace_info>
+struct trace_info_hasher : nofree_ptr_hash <dw_trace_info>
 {
-  typedef dw_trace_info value_type;
-  typedef dw_trace_info compare_type;
-  static inline hashval_t hash (const value_type *);
-  static inline bool equal (const value_type *, const compare_type *);
+  static inline hashval_t hash (const dw_trace_info *);
+  static inline bool equal (const dw_trace_info *, const dw_trace_info *);
 };
 
 inline hashval_t
-trace_info_hasher::hash (const value_type *ti)
+trace_info_hasher::hash (const dw_trace_info *ti)
 {
   return INSN_UID (ti->head);
 }
 
 inline bool
-trace_info_hasher::equal (const value_type *a, const compare_type *b)
+trace_info_hasher::equal (const dw_trace_info *a, const dw_trace_info *b)
 {
   return a->head == b->head;
 }
@@ -202,7 +201,7 @@ static GTY(()) reg_saved_in_data *cie_return_save;
 static GTY(()) unsigned long dwarf2out_cfi_label_num;
 
 /* The insn after which a new CFI note should be emitted.  */
-static rtx add_cfi_insn;
+static rtx_insn *add_cfi_insn;
 
 /* When non-null, add_cfi will add the CFI to this vector.  */
 static cfi_vec *add_cfi_vec;
@@ -221,11 +220,11 @@ static dw_cfa_location *cur_cfa;
    of the prologue or (b) the register is clobbered.  This clusters
    register saves so that there are fewer pc advances.  */
 
-typedef struct {
+struct queued_reg_save {
   rtx reg;
   rtx saved_reg;
   HOST_WIDE_INT cfa_offset;
-} queued_reg_save;
+};
 
 
 static vec<queued_reg_save> queued_reg_saves;
@@ -250,7 +249,7 @@ expand_builtin_dwarf_sp_column (void)
    which has mode MODE.  Initialize column C as a return address column.  */
 
 static void
-init_return_column_size (enum machine_mode mode, rtx mem, unsigned int c)
+init_return_column_size (machine_mode mode, rtx mem, unsigned int c)
 {
   HOST_WIDE_INT offset = c * GET_MODE_SIZE (mode);
   HOST_WIDE_INT size = GET_MODE_SIZE (Pmode);
@@ -258,44 +257,103 @@ init_return_column_size (enum machine_mode mode, rtx mem, unsigned int c)
 		  gen_int_mode (size, mode));
 }
 
-/* Generate code to initialize the register size table.  */
+/* Datastructure used by expand_builtin_init_dwarf_reg_sizes and
+   init_one_dwarf_reg_size to communicate on what has been done by the
+   latter.  */
+
+struct init_one_dwarf_reg_state
+{
+  /* Whether the dwarf return column was initialized.  */
+  bool wrote_return_column;
+
+  /* For each hard register REGNO, whether init_one_dwarf_reg_size
+     was given REGNO to process already.  */
+  bool processed_regno [FIRST_PSEUDO_REGISTER];
+
+};
+
+/* Helper for expand_builtin_init_dwarf_reg_sizes.  Generate code to
+   initialize the dwarf register size table entry corresponding to register
+   REGNO in REGMODE.  TABLE is the table base address, SLOTMODE is the mode to
+   use for the size entry to initialize, and INIT_STATE is the communication
+   datastructure conveying what we're doing to our caller.  */
+
+static
+void init_one_dwarf_reg_size (int regno, machine_mode regmode,
+			      rtx table, machine_mode slotmode,
+			      init_one_dwarf_reg_state *init_state)
+{
+  const unsigned int dnum = DWARF_FRAME_REGNUM (regno);
+  const unsigned int rnum = DWARF2_FRAME_REG_OUT (dnum, 1);
+  const unsigned int dcol = DWARF_REG_TO_UNWIND_COLUMN (rnum);
+  
+  const HOST_WIDE_INT slotoffset = dcol * GET_MODE_SIZE (slotmode);
+  const HOST_WIDE_INT regsize = GET_MODE_SIZE (regmode);
+
+  init_state->processed_regno[regno] = true;
+
+  if (rnum >= DWARF_FRAME_REGISTERS)
+    return;
+
+  if (dnum == DWARF_FRAME_RETURN_COLUMN)
+    {
+      if (regmode == VOIDmode)
+	return;
+      init_state->wrote_return_column = true;
+    }
+
+  if (slotoffset < 0)
+    return;
+
+  emit_move_insn (adjust_address (table, slotmode, slotoffset),
+		  gen_int_mode (regsize, slotmode));
+}
+
+/* Generate code to initialize the dwarf register size table located
+   at the provided ADDRESS.  */
 
 void
 expand_builtin_init_dwarf_reg_sizes (tree address)
 {
   unsigned int i;
-  enum machine_mode mode = TYPE_MODE (char_type_node);
+  machine_mode mode = TYPE_MODE (char_type_node);
   rtx addr = expand_normal (address);
   rtx mem = gen_rtx_MEM (BLKmode, addr);
-  bool wrote_return_column = false;
+
+  init_one_dwarf_reg_state init_state;
+
+  memset ((char *)&init_state, 0, sizeof (init_state));
 
   for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
     {
-      unsigned int dnum = DWARF_FRAME_REGNUM (i);
-      unsigned int rnum = DWARF2_FRAME_REG_OUT (dnum, 1);
+      machine_mode save_mode;
+      rtx span;
 
-      if (rnum < DWARF_FRAME_REGISTERS)
+      /* No point in processing a register multiple times.  This could happen
+	 with register spans, e.g. when a reg is first processed as a piece of
+	 a span, then as a register on its own later on.  */
+
+      if (init_state.processed_regno[i])
+	continue;
+
+      save_mode = targetm.dwarf_frame_reg_mode (i);
+      span = targetm.dwarf_register_span (gen_rtx_REG (save_mode, i));
+
+      if (!span)
+	init_one_dwarf_reg_size (i, save_mode, mem, mode, &init_state);
+      else
 	{
-	  HOST_WIDE_INT offset = rnum * GET_MODE_SIZE (mode);
-	  HOST_WIDE_INT size;
-	  enum machine_mode save_mode = targetm.dwarf_frame_reg_mode (i);
-
-	  if (dnum == DWARF_FRAME_RETURN_COLUMN)
+	  for (int si = 0; si < XVECLEN (span, 0); si++)
 	    {
-	      if (save_mode == VOIDmode)
-		continue;
-	      wrote_return_column = true;
-	    }
-	  size = GET_MODE_SIZE (save_mode);
-	  if (offset < 0)
-	    continue;
+	      rtx reg = XVECEXP (span, 0, si);
 
-	  emit_move_insn (adjust_address (mem, mode, offset),
-			  gen_int_mode (size, mode));
+	      init_one_dwarf_reg_size
+		(REGNO (reg), GET_MODE (reg), mem, mode, &init_state);
+	    }
 	}
     }
 
-  if (!wrote_return_column)
+  if (!init_state.wrote_return_column)
     init_return_column_size (mode, mem, DWARF_FRAME_RETURN_COLUMN);
 
 #ifdef DWARF_ALT_FRAME_RETURN_COLUMN
@@ -845,7 +903,7 @@ reg_save (unsigned int reg, unsigned int sreg, HOST_WIDE_INT offset)
    and adjust data structures to match.  */
 
 static void
-notice_args_size (rtx insn)
+notice_args_size (rtx_insn *insn)
 {
   HOST_WIDE_INT args_size, delta;
   rtx note;
@@ -869,9 +927,9 @@ notice_args_size (rtx insn)
 
       /* Convert a change in args_size (always a positive in the
 	 direction of stack growth) to a change in stack pointer.  */
-#ifndef STACK_GROWS_DOWNWARD
-      delta = -delta;
-#endif
+      if (!STACK_GROWS_DOWNWARD)
+	delta = -delta;
+
       cur_cfa->offset += delta;
     }
 }
@@ -2172,7 +2230,6 @@ add_cfis_to_fde (void)
 	      int num = dwarf2out_cfi_label_num;
 	      const char *label = dwarf2out_cfi_label ();
 	      dw_cfi_ref xcfi;
-	      rtx tmp;
 
 	      /* Set the location counter to the new label.  */
 	      xcfi = new_cfi ();
@@ -2181,7 +2238,7 @@ add_cfis_to_fde (void)
 	      xcfi->dw_cfi_oprnd1.dw_cfi_addr = label;
 	      vec_safe_push (fde->dw_fde_cfi, xcfi);
 
-	      tmp = emit_note_before (NOTE_INSN_CFI_LABEL, insn);
+	      rtx_note *tmp = emit_note_before (NOTE_INSN_CFI_LABEL, insn);
 	      NOTE_LABEL_NUMBER (tmp) = num;
 	    }
 
@@ -2272,9 +2329,9 @@ maybe_record_trace_start_abnormal (rtx_insn *start, rtx_insn *origin)
     {
       /* Convert a change in args_size (always a positive in the
 	 direction of stack growth) to a change in stack pointer.  */
-#ifndef STACK_GROWS_DOWNWARD
-      delta = -delta;
-#endif
+      if (!STACK_GROWS_DOWNWARD)
+	delta = -delta;
+
       cur_row->cfa.offset += delta;
     }
   
@@ -2866,7 +2923,6 @@ create_cie_data (void)
   dw_trace_info cie_trace;
 
   dw_stack_pointer_regnum = DWARF_FRAME_REGNUM (STACK_POINTER_REGNUM);
-  dw_frame_pointer_regnum = DWARF_FRAME_REGNUM (HARD_FRAME_POINTER_REGNUM);
 
   memset (&cie_trace, 0, sizeof (cie_trace));
   cur_trace = &cie_trace;
@@ -2919,6 +2975,9 @@ create_cie_data (void)
 static unsigned int
 execute_dwarf2_frame (void)
 {
+  /* Different HARD_FRAME_POINTER_REGNUM might coexist in the same file.  */
+  dw_frame_pointer_regnum = DWARF_FRAME_REGNUM (HARD_FRAME_POINTER_REGNUM);
+
   /* The first time we're called, compute the incoming frame state.  */
   if (cie_cfi_vec == NULL)
     create_cie_data ();
@@ -3183,7 +3242,7 @@ output_cfi_directive (FILE *f, dw_cfi_ref cfi)
     case DW_CFA_offset_extended:
     case DW_CFA_offset_extended_sf:
       r = DWARF2_FRAME_REG_OUT (cfi->dw_cfi_oprnd1.dw_cfi_reg_num, 1);
-      fprintf (f, "\t.cfi_offset %lu, "HOST_WIDE_INT_PRINT_DEC"\n",
+      fprintf (f, "\t.cfi_offset %lu, " HOST_WIDE_INT_PRINT_DEC"\n",
 	       r, cfi->dw_cfi_oprnd2.dw_cfi_offset);
       break;
 
@@ -3206,7 +3265,7 @@ output_cfi_directive (FILE *f, dw_cfi_ref cfi)
     case DW_CFA_def_cfa:
     case DW_CFA_def_cfa_sf:
       r = DWARF2_FRAME_REG_OUT (cfi->dw_cfi_oprnd1.dw_cfi_reg_num, 1);
-      fprintf (f, "\t.cfi_def_cfa %lu, "HOST_WIDE_INT_PRINT_DEC"\n",
+      fprintf (f, "\t.cfi_def_cfa %lu, " HOST_WIDE_INT_PRINT_DEC"\n",
 	       r, cfi->dw_cfi_oprnd2.dw_cfi_offset);
       break;
 
@@ -3241,13 +3300,13 @@ output_cfi_directive (FILE *f, dw_cfi_ref cfi)
 	  fprintf (f, "\t.cfi_escape %#x,", DW_CFA_GNU_args_size);
 	  dw2_asm_output_data_uleb128_raw (cfi->dw_cfi_oprnd1.dw_cfi_offset);
 	  if (flag_debug_asm)
-	    fprintf (f, "\t%s args_size "HOST_WIDE_INT_PRINT_DEC,
+	    fprintf (f, "\t%s args_size " HOST_WIDE_INT_PRINT_DEC,
 		     ASM_COMMENT_START, cfi->dw_cfi_oprnd1.dw_cfi_offset);
 	  fputc ('\n', f);
 	}
       else
 	{
-	  fprintf (f, "\t.cfi_GNU_args_size "HOST_WIDE_INT_PRINT_DEC "\n",
+	  fprintf (f, "\t.cfi_GNU_args_size " HOST_WIDE_INT_PRINT_DEC "\n",
 		   cfi->dw_cfi_oprnd1.dw_cfi_offset);
 	}
       break;
@@ -3415,11 +3474,10 @@ public:
 bool
 pass_dwarf2_frame::gate (function *)
 {
-#ifndef HAVE_prologue
   /* Targets which still implement the prologue in assembler text
      cannot use the generic dwarf2 unwinding.  */
-  return false;
-#endif
+  if (!targetm.have_prologue ())
+    return false;
 
   /* ??? What to do for UI_TARGET unwinding?  They might be able to benefit
      from the optimized shrink-wrapping annotations that we will compute.

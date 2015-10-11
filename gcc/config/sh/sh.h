@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler for Renesas / SuperH SH.
-   Copyright (C) 1993-2014 Free Software Foundation, Inc.
+   Copyright (C) 1993-2015 Free Software Foundation, Inc.
    Contributed by Steve Chamberlain (sac@cygnus.com).
    Improved by Jim Wilson (wilson@cygnus.com).
 
@@ -905,6 +905,10 @@ extern char sh_additional_register_names[ADDREGNAMES_SIZE] \
 			      && (GET_MODE_SIZE (MODE2) <= 4)) \
 			  : ((MODE1) != SFmode && (MODE2) != SFmode))))
 
+/* Specify the modes required to caller save a given hard regno.  */
+#define HARD_REGNO_CALLER_SAVE_MODE(REGNO, NREGS, MODE)	\
+  sh_hard_regno_caller_save_mode ((REGNO), (NREGS), (MODE))
+
 /* A C expression that is nonzero if hard register NEW_REG can be
    considered for use as a rename register for OLD_REG register */
 #define HARD_REGNO_RENAME_OK(OLD_REG, NEW_REG) \
@@ -1219,7 +1223,7 @@ extern enum reg_class regno_reg_class[FIRST_PSEUDO_REGISTER];
 
 /* Define this if pushing a word on the stack
    makes the stack pointer a smaller address.  */
-#define STACK_GROWS_DOWNWARD
+#define STACK_GROWS_DOWNWARD 1
 
 /*  Define this macro to nonzero if the addresses of local variable slots
     are at negative offsets from the frame pointer.  */
@@ -1591,16 +1595,6 @@ struct sh_args {
 #define USE_STORE_PRE_DECREMENT(mode)    ((mode == SImode || mode == DImode) \
 					  ? 0 : TARGET_SH1)
 
-#define MOVE_BY_PIECES_P(SIZE, ALIGN) \
-  (move_by_pieces_ninsns (SIZE, ALIGN, MOVE_MAX_PIECES + 1) \
-   < (optimize_size ? 2 : ((ALIGN >= 32) ? 16 : 2)))
-
-#define STORE_BY_PIECES_P(SIZE, ALIGN) \
-  (move_by_pieces_ninsns (SIZE, ALIGN, STORE_MAX_PIECES + 1) \
-   < (optimize_size ? 2 : ((ALIGN >= 32) ? 16 : 2)))
-
-#define SET_BY_PIECES_P(SIZE, ALIGN) STORE_BY_PIECES_P(SIZE, ALIGN)
-
 /* If a memory clear move would take CLEAR_RATIO or more simple
    move-instruction pairs, we will do a setmem instead.  */
 
@@ -1819,7 +1813,7 @@ struct sh_args {
 
 /* Define if operations between registers always perform the operation
    on the full register even if a narrower mode is specified.  */
-#define WORD_REGISTER_OPERATIONS
+#define WORD_REGISTER_OPERATIONS 1
 
 /* Define if loading in MODE, an integral mode narrower than BITS_PER_WORD
    will either zero-extend or sign-extend.  The value of this macro should
@@ -1833,7 +1827,7 @@ struct sh_args {
   : (MODE) != SImode ? SIGN_EXTEND : UNKNOWN)
 
 /* Define if loading short immediate values into registers sign extends.  */
-#define SHORT_IMMEDIATES_SIGN_EXTEND
+#define SHORT_IMMEDIATES_SIGN_EXTEND 1
 
 /* Nonzero if access to memory by bytes is no faster than for words.  */
 #define SLOW_BYTE_ACCESS 1
@@ -2250,9 +2244,6 @@ extern int current_function_interrupt;
 
 #define EPILOGUE_USES(REGNO) ((TARGET_SH2E || TARGET_SH4) \
 			      && (REGNO) == FPSCR_REG)
-
-#define MD_CAN_REDIRECT_BRANCH(INSN, SEQ) \
-  sh_can_redirect_branch ((INSN), (SEQ))
 
 #define DWARF_FRAME_RETURN_COLUMN \
   (TARGET_SH5 ? DWARF_FRAME_REGNUM (PR_MEDIA_REG) : DWARF_FRAME_REGNUM (PR_REG))

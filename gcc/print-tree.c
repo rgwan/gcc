@@ -1,5 +1,5 @@
 /* Prints out tree in human readable form - GCC
-   Copyright (C) 1990-2014 Free Software Foundation, Inc.
+   Copyright (C) 1990-2015 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -22,15 +22,17 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
 #include "varasm.h"
 #include "print-rtl.h"
 #include "stor-layout.h"
-#include "ggc.h"
 #include "langhooks.h"
 #include "tree-iterator.h"
 #include "diagnostic.h"
 #include "gimple-pretty-print.h" /* FIXME */
+#include "hard-reg-set.h"
+#include "function.h"
 #include "cgraph.h"
 #include "tree-cfg.h"
 #include "tree-dump.h"
@@ -183,7 +185,7 @@ print_node (FILE *file, const char *prefix, tree node, int indent)
 {
   int hash;
   struct bucket *b;
-  enum machine_mode mode;
+  machine_mode mode;
   enum tree_code_class tclass;
   int len;
   int i;
@@ -804,6 +806,7 @@ print_node (FILE *file, const char *prefix, tree node, int indent)
 
 	case TREE_VEC:
 	  len = TREE_VEC_LENGTH (node);
+	  fprintf (file, " length %d", len);
 	  for (i = 0; i < len; i++)
 	    if (TREE_VEC_ELT (node, i))
 	      {
@@ -905,6 +908,17 @@ print_node (FILE *file, const char *prefix, tree node, int indent)
 	  fprintf (file, " imported declaration");
 	  print_node_brief (file, "associated declaration",
 			    IMPORTED_DECL_ASSOCIATED_DECL (node),
+			    indent + 4);
+	  break;
+
+	case TREE_BINFO:
+	  fprintf (file, " bases %d",
+		   vec_safe_length (BINFO_BASE_BINFOS (node)));
+	  print_node_brief (file, "offset", BINFO_OFFSET (node), indent + 4);
+	  print_node_brief (file, "virtuals", BINFO_VIRTUALS (node),
+			    indent + 4);
+	  print_node_brief (file, "inheritance chain",
+			    BINFO_INHERITANCE_CHAIN (node),
 			    indent + 4);
 	  break;
 

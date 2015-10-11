@@ -1,5 +1,5 @@
 /* Change pseudos by memory.
-   Copyright (C) 2010-2014 Free Software Foundation, Inc.
+   Copyright (C) 2010-2015 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -58,29 +58,35 @@ along with GCC; see the file COPYING3.	If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "tree.h"
 #include "rtl.h"
+#include "df.h"
 #include "tm_p.h"
 #include "insn-config.h"
 #include "recog.h"
 #include "output.h"
 #include "regs.h"
-#include "hard-reg-set.h"
 #include "flags.h"
-#include "hashtab.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
+#include "alias.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "calls.h"
+#include "emit-rtl.h"
+#include "varasm.h"
+#include "stmt.h"
 #include "expr.h"
-#include "basic-block.h"
+#include "cfgrtl.h"
 #include "except.h"
 #include "timevar.h"
 #include "target.h"
+#include "alloc-pool.h"
+#include "lra.h"
+#include "insn-attr.h"
+#include "insn-codes.h"
 #include "lra-int.h"
 #include "ira.h"
-#include "df.h"
 
 
 /* Max regno at the start of the pass.	*/
@@ -137,7 +143,7 @@ static void
 assign_mem_slot (int i)
 {
   rtx x = NULL_RTX;
-  enum machine_mode mode = GET_MODE (regno_reg_rtx[i]);
+  machine_mode mode = GET_MODE (regno_reg_rtx[i]);
   unsigned int inherent_size = PSEUDO_REGNO_BYTES (i);
   unsigned int inherent_align = GET_MODE_ALIGNMENT (mode);
   unsigned int max_ref_width = GET_MODE_SIZE (lra_reg_info[i].biggest_mode);
@@ -210,14 +216,6 @@ regno_freq_compare (const void *v1p, const void *v2p)
   return regno1 - regno2;
 }
 
-/* Redefine STACK_GROWS_DOWNWARD in terms of 0 or 1.  */
-#ifdef STACK_GROWS_DOWNWARD
-# undef STACK_GROWS_DOWNWARD
-# define STACK_GROWS_DOWNWARD 1
-#else
-# define STACK_GROWS_DOWNWARD 0
-#endif
-
 /* Sort pseudos according to their slots, putting the slots in the order
    that they should be allocated.  Slots with lower numbers have the highest
    priority and should get the smallest displacement from the stack or
@@ -259,7 +257,7 @@ assign_spill_hard_regs (int *pseudo_regnos, int n)
 {
   int i, k, p, regno, res, spill_class_size, hard_regno, nr;
   enum reg_class rclass, spill_class;
-  enum machine_mode mode;
+  machine_mode mode;
   lra_live_range_t r;
   rtx_insn *insn;
   rtx set;
@@ -441,7 +439,7 @@ remove_pseudos (rtx *loc, rtx_insn *insn)
 	{
 	  rtx x = lra_eliminate_regs_1 (insn, pseudo_slots[i].mem,
 					GET_MODE (pseudo_slots[i].mem),
-					false, false, true);
+					false, false, 0, true);
 	  *loc = x != pseudo_slots[i].mem ? x : copy_rtx (x);
 	}
       return;

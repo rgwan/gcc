@@ -1,5 +1,4 @@
 /* PR tree-optimization/63379  */
-/* { dg-do run } */
 
 #include "tree-vect.h"
 
@@ -40,4 +39,3 @@ int main()
   return 0;
 }
 
-/* { dg-final { cleanup-tree-dump "vect" } } */

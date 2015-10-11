@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler, for MMIX.
-   Copyright (C) 2000-2014 Free Software Foundation, Inc.
+   Copyright (C) 2000-2015 Free Software Foundation, Inc.
    Contributed by Hans-Peter Nilsson (hp@bitrange.com)
 
 This file is part of GCC.
@@ -21,36 +21,41 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "cfghooks.h"
+#include "tree.h"
 #include "rtl.h"
+#include "df.h"
 #include "regs.h"
-#include "hard-reg-set.h"
-#include "hashtab.h"
 #include "insn-config.h"
 #include "output.h"
-#include "basic-block.h"
+#include "cfgrtl.h"
+#include "cfganal.h"
+#include "lcm.h"
+#include "cfgbuild.h"
+#include "cfgcleanup.h"
 #include "flags.h"
-#include "tree.h"
 #include "varasm.h"
 #include "stor-layout.h"
 #include "calls.h"
-#include "hash-set.h"
-#include "vec.h"
-#include "machmode.h"
-#include "input.h"
-#include "function.h"
+#include "alias.h"
+#include "expmed.h"
+#include "dojump.h"
+#include "explow.h"
+#include "emit-rtl.h"
+#include "stmt.h"
 #include "expr.h"
 #include "diagnostic-core.h"
 #include "recog.h"
-#include "ggc.h"
 #include "dwarf2.h"
 #include "debug.h"
 #include "tm_p.h"
 #include "target.h"
-#include "target-def.h"
-#include "df.h"
 #include "tm-constrs.h"
 #include "builtins.h"
+
+/* This file should be included last.  */
+#include "target-def.h"
 
 /* First some local helper definitions.  */
 #define MMIX_FIRST_GLOBAL_REGNUM 32
@@ -136,35 +141,35 @@ static void mmix_target_asm_function_end_prologue (FILE *);
 static void mmix_target_asm_function_epilogue (FILE *, HOST_WIDE_INT);
 static reg_class_t mmix_preferred_reload_class (rtx, reg_class_t);
 static reg_class_t mmix_preferred_output_reload_class (rtx, reg_class_t);
-static bool mmix_legitimate_address_p (enum machine_mode, rtx, bool);
-static bool mmix_legitimate_constant_p (enum machine_mode, rtx);
+static bool mmix_legitimate_address_p (machine_mode, rtx, bool);
+static bool mmix_legitimate_constant_p (machine_mode, rtx);
 static void mmix_reorg (void);
 static void mmix_asm_output_mi_thunk
   (FILE *, tree, HOST_WIDE_INT, HOST_WIDE_INT, tree);
 static void mmix_setup_incoming_varargs
-  (cumulative_args_t, enum machine_mode, tree, int *, int);
+  (cumulative_args_t, machine_mode, tree, int *, int);
 static void mmix_file_start (void);
 static void mmix_file_end (void);
-static bool mmix_rtx_costs (rtx, int, int, int, int *, bool);
-static int mmix_register_move_cost (enum machine_mode,
+static bool mmix_rtx_costs (rtx, machine_mode, int, int, int *, bool);
+static int mmix_register_move_cost (machine_mode,
 				    reg_class_t, reg_class_t);
 static rtx mmix_struct_value_rtx (tree, int);
-static enum machine_mode mmix_promote_function_mode (const_tree,
-						     enum machine_mode,
+static machine_mode mmix_promote_function_mode (const_tree,
+						     machine_mode,
 	                                             int *, const_tree, int);
-static void mmix_function_arg_advance (cumulative_args_t, enum machine_mode,
+static void mmix_function_arg_advance (cumulative_args_t, machine_mode,
 				       const_tree, bool);
-static rtx mmix_function_arg_1 (const cumulative_args_t, enum machine_mode,
+static rtx mmix_function_arg_1 (const cumulative_args_t, machine_mode,
 				const_tree, bool, bool);
-static rtx mmix_function_incoming_arg (cumulative_args_t, enum machine_mode,
+static rtx mmix_function_incoming_arg (cumulative_args_t, machine_mode,
 				       const_tree, bool);
-static rtx mmix_function_arg (cumulative_args_t, enum machine_mode,
+static rtx mmix_function_arg (cumulative_args_t, machine_mode,
 			      const_tree, bool);
 static rtx mmix_function_value (const_tree, const_tree, bool);
-static rtx mmix_libcall_value (enum machine_mode, const_rtx);
+static rtx mmix_libcall_value (machine_mode, const_rtx);
 static bool mmix_function_value_regno_p (const unsigned int);
 static bool mmix_pass_by_reference (cumulative_args_t,
-				    enum machine_mode, const_tree, bool);
+				    machine_mode, const_tree, bool);
 static bool mmix_frame_pointer_required (void);
 static void mmix_asm_trampoline_template (FILE *);
 static void mmix_trampoline_init (rtx, tree, rtx);
@@ -471,7 +476,7 @@ mmix_preferred_output_reload_class (rtx x, reg_class_t rclass)
 
 enum reg_class
 mmix_secondary_reload_class (enum reg_class rclass,
-			     enum machine_mode mode ATTRIBUTE_UNUSED,
+			     machine_mode mode ATTRIBUTE_UNUSED,
 			     rtx x ATTRIBUTE_UNUSED,
 			     int in_p ATTRIBUTE_UNUSED)
 {
@@ -592,7 +597,7 @@ mmix_initial_elimination_offset (int fromreg, int toreg)
 }
 
 static void
-mmix_function_arg_advance (cumulative_args_t argsp_v, enum machine_mode mode,
+mmix_function_arg_advance (cumulative_args_t argsp_v, machine_mode mode,
 			   const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *argsp = get_cumulative_args (argsp_v);
@@ -610,7 +615,7 @@ mmix_function_arg_advance (cumulative_args_t argsp_v, enum machine_mode mode,
 
 static rtx
 mmix_function_arg_1 (const cumulative_args_t argsp_v,
-		     enum machine_mode mode,
+		     machine_mode mode,
 		     const_tree type,
 		     bool named ATTRIBUTE_UNUSED,
 		     bool incoming)
@@ -644,7 +649,7 @@ mmix_function_arg_1 (const cumulative_args_t argsp_v,
 
 static rtx
 mmix_function_arg (cumulative_args_t argsp,
-		   enum machine_mode mode,
+		   machine_mode mode,
 		   const_tree type,
 		   bool named)
 {
@@ -653,7 +658,7 @@ mmix_function_arg (cumulative_args_t argsp,
 
 static rtx
 mmix_function_incoming_arg (cumulative_args_t argsp,
-			    enum machine_mode mode,
+			    machine_mode mode,
 			    const_tree type,
 			    bool named)
 {
@@ -664,7 +669,7 @@ mmix_function_incoming_arg (cumulative_args_t argsp,
    everything that goes by value.  */
 
 static bool
-mmix_pass_by_reference (cumulative_args_t argsp_v, enum machine_mode mode,
+mmix_pass_by_reference (cumulative_args_t argsp_v, machine_mode mode,
 			const_tree type, bool named ATTRIBUTE_UNUSED)
 {
   CUMULATIVE_ARGS *argsp = get_cumulative_args (argsp_v);
@@ -702,8 +707,8 @@ mmix_function_value (const_tree valtype,
 		     const_tree func ATTRIBUTE_UNUSED,
 		     bool outgoing)
 {
-  enum machine_mode mode = TYPE_MODE (valtype);
-  enum machine_mode cmode;
+  machine_mode mode = TYPE_MODE (valtype);
+  machine_mode cmode;
   int first_val_regnum = MMIX_OUTGOING_RETURN_VALUE_REGNUM;
   rtx vec[MMIX_MAX_REGS_FOR_VALUE];
   int i;
@@ -766,7 +771,7 @@ mmix_function_value (const_tree valtype,
 /* Implements TARGET_LIBCALL_VALUE.  */
 
 static rtx
-mmix_libcall_value (enum machine_mode mode,
+mmix_libcall_value (machine_mode mode,
 		    const_rtx fun ATTRIBUTE_UNUSED)
 {
   return gen_rtx_REG (mode, MMIX_RETURN_VALUE_REGNUM);
@@ -932,7 +937,7 @@ mmix_function_profiler (FILE *stream ATTRIBUTE_UNUSED,
 
 static void
 mmix_setup_incoming_varargs (cumulative_args_t args_so_farp_v,
-			     enum machine_mode mode,
+			     machine_mode mode,
 			     tree vartype,
 			     int *pretend_sizep,
 			     int second_time ATTRIBUTE_UNUSED)
@@ -1056,7 +1061,7 @@ mmix_constant_address_p (rtx x)
 /* Return 1 if the address is OK, otherwise 0.  */
 
 bool
-mmix_legitimate_address_p (enum machine_mode mode ATTRIBUTE_UNUSED,
+mmix_legitimate_address_p (machine_mode mode ATTRIBUTE_UNUSED,
 			   rtx x,
 			   bool strict_checking)
 {
@@ -1116,7 +1121,7 @@ mmix_legitimate_address_p (enum machine_mode mode ATTRIBUTE_UNUSED,
 /* Implement TARGET_LEGITIMATE_CONSTANT_P.  */
 
 static bool
-mmix_legitimate_constant_p (enum machine_mode mode ATTRIBUTE_UNUSED, rtx x)
+mmix_legitimate_constant_p (machine_mode mode ATTRIBUTE_UNUSED, rtx x)
 {
   RTX_CODE code = GET_CODE (x);
 
@@ -1131,7 +1136,7 @@ mmix_legitimate_constant_p (enum machine_mode mode ATTRIBUTE_UNUSED, rtx x)
 
 /* SELECT_CC_MODE.  */
 
-enum machine_mode
+machine_mode
 mmix_select_cc_mode (RTX_CODE op, rtx x, rtx y ATTRIBUTE_UNUSED)
 {
   /* We use CCmode, CC_UNSmode, CC_FPmode, CC_FPEQmode and CC_FUNmode to
@@ -1159,7 +1164,7 @@ mmix_select_cc_mode (RTX_CODE op, rtx x, rtx y ATTRIBUTE_UNUSED)
 /* REVERSIBLE_CC_MODE.  */
 
 int
-mmix_reversible_cc_mode (enum machine_mode mode)
+mmix_reversible_cc_mode (machine_mode mode)
 {
   /* That is, all integer and the EQ, NE, ORDERED and UNORDERED float
      compares.  */
@@ -1170,7 +1175,7 @@ mmix_reversible_cc_mode (enum machine_mode mode)
 
 static bool
 mmix_rtx_costs (rtx x ATTRIBUTE_UNUSED,
-		int code ATTRIBUTE_UNUSED,
+		machine_mode mode ATTRIBUTE_UNUSED,
 		int outer_code ATTRIBUTE_UNUSED,
 		int opno ATTRIBUTE_UNUSED,
 		int *total ATTRIBUTE_UNUSED,
@@ -1188,7 +1193,7 @@ mmix_rtx_costs (rtx x ATTRIBUTE_UNUSED,
    need to check that their constraints match, so say 3 for them.  */
 
 static int
-mmix_register_move_cost (enum machine_mode mode ATTRIBUTE_UNUSED,
+mmix_register_move_cost (machine_mode mode ATTRIBUTE_UNUSED,
 			 reg_class_t from,
 			 reg_class_t to)
 {
@@ -1633,7 +1638,7 @@ mmix_print_operand (FILE *stream, rtx x, int code)
 	  fatal_insn ("MMIX Internal: Bad value for 'm', not a CONST_INT",
 		      x);
 	}
-      fprintf (stream, "%"PRId64,
+      fprintf (stream, "%" PRId64,
 	       (int64_t) (mmix_intval (x) - 1));
       return;
 
@@ -1894,7 +1899,7 @@ mmix_dbx_register_number (unsigned regno)
    from insn-emit.c.  */
 
 rtx
-mmix_get_hard_reg_initial_val (enum machine_mode mode, int regno)
+mmix_get_hard_reg_initial_val (machine_mode mode, int regno)
 {
   return get_hard_reg_initial_val (mode, regno);
 }
@@ -2081,8 +2086,7 @@ mmix_expand_prologue (void)
 			     tmpreg);
       RTX_FRAME_RELATED_P (insn) = 1;
       add_reg_note (insn, REG_FRAME_RELATED_EXPR,
-		    gen_rtx_SET (VOIDmode,
-				 gen_rtx_MEM (DImode,
+		    gen_rtx_SET (gen_rtx_MEM (DImode,
 					      plus_constant (Pmode,
 							     stack_pointer_rtx,
 							     offset)),
@@ -2306,7 +2310,7 @@ mmix_output_register_setting (FILE *stream,
     fprintf (stream, "\t");
 
   if (insn_const_int_ok_for_constraint (value, CONSTRAINT_K))
-    fprintf (stream, "NEGU %s,0,%"PRId64, reg_names[regno], -value);
+    fprintf (stream, "NEGU %s,0,%" PRId64, reg_names[regno], -value);
   else if (mmix_shiftable_wyde_value ((uint64_t) value))
     {
       /* First, the one-insn cases.  */
@@ -2439,7 +2443,7 @@ mmix_shiftable_wyde_value (uint64_t value)
 rtx
 mmix_gen_compare_reg (RTX_CODE code, rtx x, rtx y)
 {
-  enum machine_mode ccmode = SELECT_CC_MODE (code, x, y);
+  machine_mode ccmode = SELECT_CC_MODE (code, x, y);
   return gen_reg_rtx (ccmode);
 }
 
@@ -2500,7 +2504,7 @@ mmix_output_shiftvalue_op_from_str (FILE *stream,
   if (! mmix_shiftable_wyde_value (value))
     {
       char s[sizeof ("0xffffffffffffffff")];
-      sprintf (s, "%#"PRIx64, value);
+      sprintf (s, "%#" PRIx64, value);
       internal_error ("MMIX Internal: %s is not a shiftable int", s);
     }
 
@@ -2542,7 +2546,7 @@ mmix_output_octa (FILE *stream, int64_t value, int do_begin_end)
     fprintf (stream, "#" HOST_WIDE_INT_PRINT_HEX_PURE,
 	     (HOST_WIDE_INT) value);
   else /* Need to avoid the hex output; there's no ...WIDEST...HEX_PURE.  */
-    fprintf (stream, "%"PRIu64, value);
+    fprintf (stream, "%" PRIu64, value);
 
   if (do_begin_end)
     fprintf (stream, "\n");
@@ -2559,7 +2563,7 @@ mmix_output_shifted_value (FILE *stream, int64_t value)
   if (! mmix_shiftable_wyde_value (value))
     {
       char s[16+2+1];
-      sprintf (s, "%#"PRIx64, value);
+      sprintf (s, "%#" PRIx64, value);
       internal_error ("MMIX Internal: %s is not a shiftable int", s);
     }
 
@@ -2603,7 +2607,7 @@ mmix_output_condition (FILE *stream, const_rtx x, int reversed)
 
   struct cc_type_conv
   {
-    enum machine_mode cc_mode;
+    machine_mode cc_mode;
 
     /* Terminated with {UNKNOWN, NULL, NULL} */
     const struct cc_conv *const convs;
@@ -2661,7 +2665,7 @@ mmix_output_condition (FILE *stream, const_rtx x, int reversed)
   size_t i;
   int j;
 
-  enum machine_mode mode = GET_MODE (XEXP (x, 0));
+  machine_mode mode = GET_MODE (XEXP (x, 0));
   RTX_CODE cc = GET_CODE (x);
 
   for (i = 0; i < ARRAY_SIZE (cc_convs); i++)
@@ -2739,9 +2743,9 @@ mmix_intval (const_rtx x)
 
 /* Worker function for TARGET_PROMOTE_FUNCTION_MODE.  */
 
-enum machine_mode
+machine_mode
 mmix_promote_function_mode (const_tree type ATTRIBUTE_UNUSED,
-                            enum machine_mode mode,
+                            machine_mode mode,
                             int *punsignedp ATTRIBUTE_UNUSED,
                             const_tree fntype ATTRIBUTE_UNUSED,
                             int for_return)

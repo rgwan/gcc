@@ -1,5 +1,5 @@
 /* Language-dependent hooks for Objective-C.
-   Copyright (C) 2001-2014 Free Software Foundation, Inc.
+   Copyright (C) 2001-2015 Free Software Foundation, Inc.
    Contributed by Ziemowit Laski  <zlaski@apple.com>
 
 This file is part of GCC.
@@ -23,11 +23,12 @@ along with GCC; see the file COPYING3.  If not see
 #include "system.h"
 #include "coretypes.h"
 #include "tm.h"
+#include "alias.h"
 #include "tree.h"
+#include "options.h"
 #include "c/c-tree.h"
 #include "c-family/c-common.h"
 #include "c-family/c-objc.h"
-#include "ggc.h"
 #include "objc-act.h"
 #include "langhooks.h"
 #include "langhooks-def.h"

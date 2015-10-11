@@ -1,5 +1,5 @@
 /* RTL-based forward propagation pass for GNU compiler.
-   Copyright (C) 2005-2014 Free Software Foundation, Inc.
+   Copyright (C) 2005-2015 Free Software Foundation, Inc.
    Contributed by Paolo Bonzini and Steven Bosscher.
 
 This file is part of GCC.
@@ -21,18 +21,19 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
-#include "tm.h"
+#include "backend.h"
+#include "predict.h"
+#include "rtl.h"
+#include "df.h"
 #include "diagnostic-core.h"
 
 #include "sparseset.h"
-#include "rtl.h"
 #include "tm_p.h"
 #include "insn-config.h"
 #include "recog.h"
 #include "flags.h"
-#include "obstack.h"
-#include "basic-block.h"
-#include "df.h"
+#include "cfgrtl.h"
+#include "cfgcleanup.h"
 #include "target.h"
 #include "cfgloop.h"
 #include "tree-pass.h"
@@ -382,7 +383,7 @@ canonicalize_address (rtx x)
    for a memory access in the given MODE.  */
 
 static bool
-should_replace_address (rtx old_rtx, rtx new_rtx, enum machine_mode mode,
+should_replace_address (rtx old_rtx, rtx new_rtx, machine_mode mode,
 			addr_space_t as, bool speed)
 {
   int gain;
@@ -404,7 +405,8 @@ should_replace_address (rtx old_rtx, rtx new_rtx, enum machine_mode mode,
      eliminating the most insns without additional costs, and it
      is the same that cse.c used to do.  */
   if (gain == 0)
-    gain = set_src_cost (new_rtx, speed) - set_src_cost (old_rtx, speed);
+    gain = (set_src_cost (new_rtx, VOIDmode, speed)
+	    - set_src_cost (old_rtx, VOIDmode, speed));
 
   return (gain > 0);
 }
@@ -452,8 +454,8 @@ propagate_rtx_1 (rtx *px, rtx old_rtx, rtx new_rtx, int flags)
 {
   rtx x = *px, tem = NULL_RTX, op0, op1, op2;
   enum rtx_code code = GET_CODE (x);
-  enum machine_mode mode = GET_MODE (x);
-  enum machine_mode op_mode;
+  machine_mode mode = GET_MODE (x);
+  machine_mode op_mode;
   bool can_appear = (flags & PR_CAN_APPEAR) != 0;
   bool valid_ops = true;
 
@@ -646,7 +648,7 @@ varying_mem_p (const_rtx x)
    Otherwise, we accept simplifications that have a lower or equal cost.  */
 
 static rtx
-propagate_rtx (rtx x, enum machine_mode mode, rtx old_rtx, rtx new_rtx,
+propagate_rtx (rtx x, machine_mode mode, rtx old_rtx, rtx new_rtx,
 	       bool speed)
 {
   rtx tem;
@@ -952,7 +954,7 @@ try_fwprop_subst (df_ref use, rtx *loc, rtx new_rtx, rtx_insn *def_insn,
      multiple sets.  If so, assume the cost of the new instruction is
      not greater than the old one.  */
   if (set)
-    old_cost = set_src_cost (SET_SRC (set), speed);
+    old_cost = set_src_cost (SET_SRC (set), GET_MODE (SET_DEST (set)), speed);
   if (dump_file)
     {
       fprintf (dump_file, "\nIn insn %d, replacing\n ", INSN_UID (insn));
@@ -973,7 +975,8 @@ try_fwprop_subst (df_ref use, rtx *loc, rtx new_rtx, rtx_insn *def_insn,
 
   else if (DF_REF_TYPE (use) == DF_REF_REG_USE
 	   && set
-	   && set_src_cost (SET_SRC (set), speed) > old_cost)
+	   && (set_src_cost (SET_SRC (set), GET_MODE (SET_DEST (set)), speed)
+	       > old_cost))
     {
       if (dump_file)
 	fprintf (dump_file, "Changes to insn %d not profitable\n",
@@ -1068,7 +1071,7 @@ forward_propagate_subreg (df_ref use, rtx_insn *def_insn, rtx def_set)
   rtx src;
 
   /* Only consider subregs... */
-  enum machine_mode use_mode = GET_MODE (use_reg);
+  machine_mode use_mode = GET_MODE (use_reg);
   if (GET_CODE (use_reg) != SUBREG
       || !REG_P (SET_DEST (def_set)))
     return false;
@@ -1216,7 +1219,7 @@ forward_propagate_and_simplify (df_ref use, rtx_insn *def_insn, rtx def_set)
   rtx use_set = single_set (use_insn);
   rtx src, reg, new_rtx, *loc;
   bool set_reg_equal;
-  enum machine_mode mode;
+  machine_mode mode;
   int asm_use = -1;
 
   if (INSN_CODE (use_insn) < 0)
